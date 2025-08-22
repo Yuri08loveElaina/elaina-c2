@@ -64,6 +64,10 @@ It is designed to assist security professionals in **Active Directory assessment
 ```bash
 git clone https://github.com/yuri08loveelaina/elaina-c2.git
 cd elaina-c2
+sudo apt update
+sudo apt install python3-pip python3-venv
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 - Install Dependencies
@@ -84,7 +88,7 @@ python elaina-cute.py --gui
 python elaina-cute.py
 ```
 
- ##Command-Line Examples
+ ## Command-Line Examples
 
 - Web scan
 ```
