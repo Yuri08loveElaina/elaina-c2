@@ -6337,7 +6337,7 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
         driver.quit()
 
 def main():
-    parser = argparse.ArgumentParser(description="Elaina Ultimate Exploit Tool")
+    parser = argparse.ArgumentParser(description="ELAINA-C2-FRAMEWORK")
     parser.add_argument("url", help="Target URL to scan & attack", nargs='?', default=None)
     parser.add_argument("--tor", action="store_true", help="Enable TOR")
     parser.add_argument("--tor-pass", default="yuriontop", help="TOR control password")
